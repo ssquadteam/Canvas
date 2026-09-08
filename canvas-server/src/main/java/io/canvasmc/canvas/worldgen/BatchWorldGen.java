@@ -182,13 +182,38 @@ public final class BatchWorldGen {
 
     static @Nullable ProtoChunk read(final ServerLevel level, final ChunkPos pos) {
         try {
-            final CompoundTag data = MoonriseRegionFileIO.loadData(
-                level, pos.x(), pos.z(), MoonriseRegionFileIO.RegionFileType.CHUNK_DATA, Priority.HIGHER
-            );
-            if (data == null) {
-                return null;
-            }
+            return parse(level, pos, readAsync(level, pos.x(), pos.z()).join());
+        } catch (final Throwable thr) {
+            LOGGER.error("Failed to read chunk {} for batch generation", pos, thr);
+            return null;
+        }
+    }
 
+    /**
+     * Starts the read without waiting for it. The region files are served by their own small pool, so a generator that
+     * blocks on one chunk at a time spends most of its time waiting for that pool rather than generating.
+     */
+    static CompletableFuture<@Nullable CompoundTag> readAsync(final ServerLevel level, final int chunkX, final int chunkZ) {
+        final CompletableFuture<@Nullable CompoundTag> future = new CompletableFuture<>();
+        MoonriseRegionFileIO.loadDataAsync(
+            level, chunkX, chunkZ, MoonriseRegionFileIO.RegionFileType.CHUNK_DATA,
+            (final CompoundTag data, final Throwable thr) -> {
+                if (thr != null) {
+                    future.completeExceptionally(thr);
+                } else {
+                    future.complete(data);
+                }
+            }, true, Priority.HIGHER
+        );
+        return future;
+    }
+
+    static @Nullable ProtoChunk parse(final ServerLevel level, final ChunkPos pos, final @Nullable CompoundTag data) {
+        if (data == null) {
+            return null;
+        }
+
+        try {
             final SerializableChunkData chunkData = SerializableChunkData.parse(
                 level, level.palettedContainerFactory(), level.getChunkSource().chunkMap.upgradeChunkTag(data)
             );
