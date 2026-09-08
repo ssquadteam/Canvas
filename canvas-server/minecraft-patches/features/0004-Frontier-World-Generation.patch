@@ -1,0 +1,21 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: ssquadteam <sahib.2009.sa@gmail.com>
+Date: Tue, 8 Sep 2026 20:55:42 +0000
+Subject: [PATCH] Frontier World Generation
+
+
+diff --git a/io/papermc/paper/threadedregions/RegionizedServer.java b/io/papermc/paper/threadedregions/RegionizedServer.java
+index 53dbff5600c325c54f8fb45bc25f2ab21782bca2..79baf62ee3c01be2b40bbbc56ca9649de8bfe291 100644
+--- a/io/papermc/paper/threadedregions/RegionizedServer.java
++++ b/io/papermc/paper/threadedregions/RegionizedServer.java
+@@ -277,6 +277,10 @@ public final class RegionizedServer {
+         // commands
+         minecraftServer.handleConsoleInputs();
+ 
++        // Canvas start - frontier world generation
++        io.canvasmc.canvas.worldgen.LiveWorldGen.tick(minecraftServer);
++        // Canvas end - frontier world generation
++
+         // needs
+         // player ping sample
+         // world global tick
