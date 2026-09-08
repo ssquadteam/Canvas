@@ -1,6 +1,6 @@
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
-@@ -412,6 +_,34 @@
+@@ -412,6 +_,35 @@
          private final LongHeapPriorityQueue loadingQueue = new LongHeapPriorityQueue(this.queueComparator);
          private final LongHeapPriorityQueue loadQueue = new LongHeapPriorityQueue(this.queueComparator);
  
@@ -281,7 +281,7 @@
                  }
  
                  final byte stage = this.chunkTicketStage.get(chunk);
-@@ -1061,6 +_,27 @@
+@@ -1061,6 +_,28 @@
                  }
              }
  
@@ -318,7 +318,7 @@
              // sends the chunk unload packets
              this.broadcastMap.remove();
              // cleans up loading/generating tickets
-@@ -1083,6 +_,14 @@
+@@ -1083,6 +_,15 @@
              // cleans up ticking tickets
              this.tickMap.remove();
  
@@ -334,7 +334,7 @@
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1096,6 +_,229 @@
+@@ -1096,6 +_,228 @@
  
              // now all tickets should be removed, which is all of our external state
          }
