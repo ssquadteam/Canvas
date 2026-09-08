@@ -1,0 +1,14 @@
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -3296,4 +_,11 @@
+         return io.canvasmc.canvas.threadedregions.ServerRegionTickManager.API_INSTANCE;
+     }
+     // Canvas end - region threading
++
++    // Canvas start - native LOD chunks
++    @Override
++    public io.canvasmc.canvas.chunk.lod.LodChunkService getLodChunkService() {
++        return io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance();
++    }
++    // Canvas end - native LOD chunks
+ }

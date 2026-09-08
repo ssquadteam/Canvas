@@ -691,4 +691,49 @@ public class WorldConfig extends Part {
         public boolean thunderStopsAfterSleep = true;
     }
 
+    public WorldChunkSystem worldChunkSystem = new WorldChunkSystem();
+
+    public static class WorldChunkSystem extends Part {
+
+        {
+            option("lodViewDistance")
+                .docs(
+                    "Extends the client view distance with chunks read straight off disk, AKA \"fake chunks\". They are",
+                    "never loaded or ticked on the server. Best used on pre-generated worlds, nothing is ever generated"
+                ).greaterThanOrEqualTo(0);
+            option("lodCutoffY")
+                .docs("Empties LOD chunks below this Y level, trimming data clients never see at range");
+        }
+
+        {
+            option("lodSendLight")
+                .docs(
+                    "Sends light data with LOD chunks. Turning this off roughly halves the bytes an LOD chunk costs,",
+                    "but distant terrain then renders black, so only do it while measuring bandwidth"
+                );
+            option("lodHollowChunks")
+                .docs(
+                    Style.wrap(
+                        "EXPERIMENTAL. Drops every block that no neighbour leaves visible, keeping only the surface,",
+                        "cave walls and cliff faces. Shrinks LOD chunks a lot, recommended on"
+                    )
+                    .blank()
+                    .wordWrap(
+                        "The cost is that a hollowed column is missing real blocks, so walking into it sends the real",
+                        "chunk again and the client rebuilds the mesh. This is forced on regardless of this option when",
+                        "Anti-Xray is enabled, since it is what keeps buried ore out of LOD chunks"
+                    )
+                );
+        }
+
+        public int lodViewDistance = 0;
+        public int lodCutoffY = 0;
+        public boolean lodSendLight = true;
+        public boolean lodHollowChunks = false;
+
+        public boolean lodEnabled() {
+            return this.lodViewDistance > 0;
+        }
+    }
+
 }

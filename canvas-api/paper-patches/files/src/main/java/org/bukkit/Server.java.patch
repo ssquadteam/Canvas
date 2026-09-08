@@ -1,0 +1,15 @@
+--- a/src/main/java/org/bukkit/Server.java
++++ b/src/main/java/org/bukkit/Server.java
+@@ -2906,4 +_,12 @@
+      */
+     @NotNull io.canvasmc.canvas.region.RegionThreadingTickManager getRegionThreadingTickRateManager();
+     // Canvas end - region threading
++
++    // Canvas start - native LOD chunks
++    /**
++     * Gets the LOD chunk service, which controls Canvas' disk backed "fake chunk" horizon
++     * @return the LOD chunk service
++     */
++    @NotNull io.canvasmc.canvas.chunk.lod.LodChunkService getLodChunkService();
++    // Canvas end - native LOD chunks
+ }

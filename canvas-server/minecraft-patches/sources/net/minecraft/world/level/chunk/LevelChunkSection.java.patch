@@ -1,0 +1,17 @@
+--- a/net/minecraft/world/level/chunk/LevelChunkSection.java
++++ b/net/minecraft/world/level/chunk/LevelChunkSection.java
+@@ -170,6 +_,14 @@
+         return previous;
+     }
+ 
++    // Canvas start - native LOD chunks
++    // hollowing only ever replaces non air blocks with air, so the count moves by a known delta and does not need
++    // the full recalcBlockCounts pass
++    public void canvas$removeNonEmptyBlocks(final int removed) {
++        this.nonEmptyBlockCount -= (short) removed;
++    }
++    // Canvas end - native LOD chunks
++
+     public boolean hasOnlyAir() {
+         return this.nonEmptyBlockCount == 0;
+     }
