@@ -335,6 +335,9 @@ final class LodSectionCodec {
         int globalBits;
         int entryCount;
 
+        // occlusion bits and the air and fluid counts of both nibbles of a byte, see scanNibbles
+        private final int[] nibblePairs = new int[256];
+
         void grow(final int size) {
             if (this.palette.length < size + 1) {
                 this.palette = Arrays.copyOf(this.palette, Math.max(size + 1, this.palette.length * 2));
@@ -449,6 +452,32 @@ final class LodSectionCodec {
             return count ? (nonEmpty << 16) | fluids : 0;
         }
 
+        // one lookup per byte replaces two palette reads and their branches, and a nibble past the palette reads as a
+        // plain block rather than running off the flags
+        private int[] nibblePairs(final int[] paletteFlags) {
+            final int[] pairs = this.nibblePairs;
+            final int size = Math.min(this.paletteSize, 16);
+
+            for (int both = 0; both < 256; ++both) {
+                final int low = nibbleBits(paletteFlags, both & 15, size);
+                final int high = nibbleBits(paletteFlags, both >>> 4, size);
+                pairs[both] = (low & 1) | ((high & 1) << 1)
+                    | ((((low >>> 1) & 1) + ((high >>> 1) & 1)) << 2)
+                    | ((((low >>> 2) & 1) + ((high >>> 2) & 1)) << 4);
+            }
+            return pairs;
+        }
+
+        private static int nibbleBits(final int[] paletteFlags, final int nibble, final int size) {
+            if (nibble >= size) {
+                return 1 << 1; // outside the palette: not air, not a fluid, hides nothing
+            }
+            final int flags = paletteFlags[nibble];
+            return ((flags & FLAG_OCCLUDES) != 0 ? 1 : 0)
+                | ((flags & FLAG_AIR) == 0 ? 1 << 1 : 0)
+                | ((flags & FLAG_FLUID) != 0 ? 1 << 2 : 0);
+        }
+
         private int scanNibbles(
             final long[] data,
             final int[] out,
@@ -458,33 +487,43 @@ final class LodSectionCodec {
             final int @Nullable [] opaque
         ) {
             final boolean mask = opaque != null;
-            final boolean inspect = count || mask;
+            if (!count && !mask) {
+                if (store) {
+                    for (int row = 0; row < 256; ++row) {
+                        final long packed = data[row];
+                        final int base = row << 4;
+                        for (int at = 0; at < 8; ++at) {
+                            final int both = (int) ((packed >>> (at << 3)) & 0xFF);
+                            out[base + (at << 1)] = both & 15;
+                            out[base + (at << 1) + 1] = both >>> 4;
+                        }
+                    }
+                }
+                return 0;
+            }
+
+            final int[] pairs = this.nibblePairs(paletteFlags);
             int nonEmpty = 0;
             int fluids = 0;
+
             for (int row = 0; row < 256; ++row) {
                 final long packed = data[row];
                 final int base = row << 4;
                 int rowMask = 0;
-                for (int x = 0; x < 16; ++x) {
-                    final int local = (int) ((packed >>> (x << 2)) & 15);
+
+                for (int at = 0; at < 8; ++at) {
+                    final int both = (int) ((packed >>> (at << 3)) & 0xFF);
                     if (store) {
-                        out[base + x] = local;
+                        out[base + (at << 1)] = both & 15;
+                        out[base + (at << 1) + 1] = both >>> 4;
                     }
-                    if (inspect) {
-                        final int flags = paletteFlags[local];
-                        if (count) {
-                            if ((flags & FLAG_AIR) == 0) {
-                                ++nonEmpty;
-                            }
-                            if ((flags & FLAG_FLUID) != 0) {
-                                ++fluids;
-                            }
-                        }
-                        if (mask && (flags & FLAG_OCCLUDES) != 0) {
-                            rowMask |= 1 << x;
-                        }
-                    }
+
+                    final int pair = pairs[both];
+                    rowMask |= (pair & 3) << (at << 1);
+                    nonEmpty += (pair >>> 2) & 3;
+                    fluids += (pair >>> 4) & 3;
                 }
+
                 if (mask) {
                     opaque[row] = rowMask;
                 }
