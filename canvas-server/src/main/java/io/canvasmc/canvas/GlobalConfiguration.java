@@ -15,6 +15,7 @@ import io.canvasmc.canvas.subcommands.RegionTickSubCommand;
 import io.canvasmc.canvas.subcommands.ReloadSubCommand;
 import io.canvasmc.canvas.subcommands.SetMaxPlayersSubCommand;
 import io.canvasmc.canvas.subcommands.WorldDistanceSubCommand;
+import io.canvasmc.canvas.subcommands.WorldGenSubCommand;
 import io.canvasmc.canvas.threadedregions.scheduler.AffinitySchedulerThreadPool;
 import io.canvasmc.canvas.util.FasterRandomSource;
 import io.canvasmc.canvas.util.LockedReference;
@@ -248,7 +249,8 @@ public class GlobalConfiguration extends Part {
                 WorldDistanceSubCommand.class,
                 ReloadSubCommand.class,
                 MobCapsSubCommand.class,
-                RegionTickSubCommand.class // TODO - merge this into regiondata command
+                RegionTickSubCommand.class, // TODO - merge this into regiondata command
+                WorldGenSubCommand.class
                 // RegionDataCommand.class // TODO - regiondata command
             );
 
