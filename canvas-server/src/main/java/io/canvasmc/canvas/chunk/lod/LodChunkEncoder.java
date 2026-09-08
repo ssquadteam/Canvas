@@ -399,6 +399,7 @@ public final class LodChunkEncoder {
         private boolean truncated;
         private boolean hasBiomes;
         private boolean modified;
+        private boolean valuesReady;
         private int nonEmpty;
         private int fluids;
 
@@ -412,6 +413,7 @@ public final class LodChunkEncoder {
             this.truncated = false;
             this.hasBiomes = false;
             this.modified = false;
+            this.valuesReady = false;
             this.nonEmpty = 0;
             this.fluids = 0;
             this.skyLight = null;
@@ -431,7 +433,10 @@ public final class LodChunkEncoder {
             int airEntries = 0;
             int fluidEntries = 0;
             for (int i = 0; i < paletteSize; ++i) {
-                final int flags = LodSectionCodec.stateFlags(this.blocks.palette[i]);
+                int flags = LodSectionCodec.stateFlags(this.blocks.palette[i]);
+                if (lavaOccludes && LodSectionCodec.isLava(this.blocks.palette[i])) {
+                    flags |= LodSectionCodec.FLAG_OCCLUDES;
+                }
                 this.paletteFlags[i] = flags;
                 if ((flags & LodSectionCodec.FLAG_AIR) != 0) {
                     ++airEntries;
@@ -439,7 +444,7 @@ public final class LodChunkEncoder {
                 if ((flags & LodSectionCodec.FLAG_FLUID) != 0) {
                     ++fluidEntries;
                 }
-                if (hollow && this.occludes(i, lavaOccludes)) {
+                if (hollow && (flags & LodSectionCodec.FLAG_OCCLUDES) != 0) {
                     ++occluding;
                 }
             }
@@ -464,60 +469,27 @@ public final class LodChunkEncoder {
             }
 
             final boolean maskBlocks = hollow && occluding != 0 && occluding != paletteSize;
-            final boolean needValues = this.blocks.globalPalette || (hollow && this.nonEmpty != 0);
+            final boolean store = this.blocks.globalPalette;
             if (countsFromPalette && !maskBlocks) {
-                if (needValues) {
+                if (store) {
                     this.blocks.unpack(this.values);
+                    this.valuesReady = true;
                 }
                 return;
             }
 
-            this.blocks.unpack(this.values);
-
-            if (countsFromPalette) {
-                for (int i = 0; i < SECTION_VOLUME; ++i) {
-                    if (this.occludes(this.values[i], lavaOccludes)) {
-                        this.opaque[i >> 4] |= 1 << (i & 15);
-                    }
-                }
-                return;
+            final int counted = this.blocks.scan(
+                this.values,
+                store,
+                this.paletteFlags,
+                !countsFromPalette,
+                maskBlocks ? this.opaque : null
+            );
+            this.valuesReady = store;
+            if (!countsFromPalette) {
+                this.nonEmpty = counted >>> 16;
+                this.fluids = counted & 0xFFFF;
             }
-
-            int nonEmpty = 0;
-            int fluids = 0;
-            if (maskBlocks) {
-                for (int i = 0; i < SECTION_VOLUME; ++i) {
-                    final int local = this.values[i];
-                    final int flags = this.paletteFlags[local];
-                    if ((flags & LodSectionCodec.FLAG_AIR) == 0) {
-                        ++nonEmpty;
-                    }
-                    if ((flags & LodSectionCodec.FLAG_FLUID) != 0) {
-                        ++fluids;
-                    }
-                    if (this.occludes(local, lavaOccludes)) {
-                        this.opaque[i >> 4] |= 1 << (i & 15);
-                    }
-                }
-            } else {
-                for (int i = 0; i < SECTION_VOLUME; ++i) {
-                    final int flags = this.paletteFlags[this.values[i]];
-                    if ((flags & LodSectionCodec.FLAG_AIR) == 0) {
-                        ++nonEmpty;
-                    }
-                    if ((flags & LodSectionCodec.FLAG_FLUID) != 0) {
-                        ++fluids;
-                    }
-                }
-            }
-            this.nonEmpty = nonEmpty;
-            this.fluids = fluids;
-        }
-
-        // comparing by identity with the default state matches Anti-Xray, only source lava obscures
-        private boolean occludes(final int local, final boolean lavaOccludes) {
-            return (this.paletteFlags[local] & LodSectionCodec.FLAG_OCCLUDES) != 0
-                || (lavaOccludes && LodSectionCodec.isLava(this.blocks.palette[local]));
         }
 
         private void hollow(final int @Nullable [] below, final int @Nullable [] above) {
@@ -531,6 +503,13 @@ public final class LodChunkEncoder {
 
             for (int row = 0; row < ROWS; ++row) {
                 int covered = coveredRow(opaque, row, below, above);
+                if (covered == 0) {
+                    continue;
+                }
+                if (!this.valuesReady) {
+                    this.blocks.unpack(this.values);
+                    this.valuesReady = true;
+                }
 
                 while (covered != 0) {
                     final int x = Integer.numberOfTrailingZeros(covered);

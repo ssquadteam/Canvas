@@ -1,5 +1,6 @@
 package io.canvasmc.canvas.chunk.lod;
 
+import it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import java.util.Arrays;
 import java.util.Optional;
@@ -54,14 +55,16 @@ final class LodSectionCodec {
     private static final int BLOCK_GLOBAL_BITS = Mth.ceillog2(Block.BLOCK_STATE_REGISTRY.size());
 
     private static final ConcurrentHashMap<String, Block> BLOCKS_BY_NAME = new ConcurrentHashMap<>(256);
-    private static final ConcurrentHashMap<PropertyMemo, Integer> SHARED_PROPERTY_IDS = new ConcurrentHashMap<>(512);
+    private static final ConcurrentHashMap<String, Integer> NAME_IDS = new ConcurrentHashMap<>(256);
+    private static final ConcurrentHashMap<Long, Integer> SHARED_PROPERTY_IDS = new ConcurrentHashMap<>(512);
 
-    private final Object2IntOpenHashMap<PropertyMemo> propertyIds = new Object2IntOpenHashMap<>(512);
+    private final Object2IntOpenHashMap<String> nameIds = new Object2IntOpenHashMap<>(256);
+    private final Long2IntOpenHashMap propertyIds = new Long2IntOpenHashMap(512);
     private final Object2IntOpenHashMap<String> biomeIds = new Object2IntOpenHashMap<>(64);
-    private final PropertyProbe propertyProbe = new PropertyProbe();
     private @Nullable IdMap<Holder<Biome>> biomeIdMap;
 
     private LodSectionCodec() {
+        this.nameIds.defaultReturnValue(-1);
         this.propertyIds.defaultReturnValue(-1);
         this.biomeIds.defaultReturnValue(-1);
     }
@@ -176,41 +179,59 @@ final class LodSectionCodec {
 
         final Tag propertiesTag = entry.get("Properties");
         if (!(propertiesTag instanceof final CompoundTag properties) || properties.isEmpty()) {
-            return defaultStateId(name);
+            return this.defaultStateId(name);
         }
 
-        final PropertyProbe probe = this.propertyProbe.assign(name, properties);
-        final int local = this.propertyIds.getInt(probe);
+        final long fingerprint = propertyFingerprint(name, properties);
+        final int local = this.propertyIds.get(fingerprint);
         if (local >= 0) {
             return local;
         }
 
-        final Integer shared = SHARED_PROPERTY_IDS.get(probe);
+        final Integer shared = SHARED_PROPERTY_IDS.get(fingerprint);
         if (shared != null) {
-            this.rememberProperty(probe.freeze(), shared);
+            this.rememberProperty(fingerprint, shared);
             return shared;
         }
 
         final int id = this.stateIdWithProperties(name, properties);
         if (id >= 0) {
-            this.rememberProperty(probe.freeze(), id);
+            this.rememberProperty(fingerprint, id);
         }
         return id;
     }
 
-    private void rememberProperty(final PropertyMemo key, final int id) {
+    private void rememberProperty(final long fingerprint, final int id) {
         if (this.propertyIds.size() >= MAX_MEMO_ENTRIES) {
             this.propertyIds.clear();
         }
-        this.propertyIds.put(key, id);
+        this.propertyIds.put(fingerprint, id);
         if (SHARED_PROPERTY_IDS.size() < MAX_MEMO_ENTRIES) {
-            SHARED_PROPERTY_IDS.putIfAbsent(key, id);
+            SHARED_PROPERTY_IDS.putIfAbsent(fingerprint, id);
         }
     }
 
-    private static int defaultStateId(final String name) {
+    private int defaultStateId(final String name) {
+        final int memo = this.nameIds.getInt(name);
+        if (memo >= 0) {
+            return memo;
+        }
+
+        final Integer shared = NAME_IDS.get(name);
+        if (shared != null) {
+            this.nameIds.put(name, shared);
+            return shared;
+        }
+
         final Block block = blockByName(name);
-        return block == null ? -1 : Block.BLOCK_STATE_REGISTRY.getId(block.defaultBlockState());
+        if (block == null) {
+            return -1;
+        }
+
+        final int id = Block.BLOCK_STATE_REGISTRY.getId(block.defaultBlockState());
+        this.nameIds.put(name, id);
+        NAME_IDS.putIfAbsent(name, id);
+        return id;
     }
 
     private int stateIdWithProperties(final String name, final CompoundTag properties) {
@@ -284,113 +305,19 @@ final class LodSectionCodec {
         return id;
     }
 
-    private static int propertyHash(final String name, final CompoundTag properties) {
-        int hash = name.hashCode();
+    private static long propertyFingerprint(final String name, final CompoundTag properties) {
+        long hash = mix((long) name.hashCode());
         for (final String key : properties.keySet()) {
-            hash += 31 * key.hashCode() + properties.getStringOr(key, "").hashCode();
+            hash ^= mix(((long) key.hashCode() << 32) ^ properties.getStringOr(key, "").hashCode());
         }
+        hash ^= mix(properties.size());
         return hash;
     }
 
-    /**
-     * Lookup key that hashes a palette entry without allocating. Fastutil and ConcurrentHashMap both call
-     * {@code probe.equals(stored)}, so this only has to recognise {@link PropertyMemo}.
-     */
-    private static final class PropertyProbe {
-
-        private String name = "";
-        private CompoundTag properties = new CompoundTag();
-        private int hash;
-
-        private PropertyProbe assign(final String name, final CompoundTag properties) {
-            this.name = name;
-            this.properties = properties;
-            this.hash = propertyHash(name, properties);
-            return this;
-        }
-
-        private PropertyMemo freeze() {
-            final int size = this.properties.size();
-            final String[] keys = new String[size];
-            final String[] values = new String[size];
-            int index = 0;
-            for (final String key : this.properties.keySet()) {
-                keys[index] = key;
-                values[index] = this.properties.getStringOr(key, "");
-                ++index;
-            }
-            return new PropertyMemo(this.name, keys, values, this.hash);
-        }
-
-        @Override
-        public int hashCode() {
-            return this.hash;
-        }
-
-        @Override
-        public boolean equals(final Object other) {
-            return other instanceof final PropertyMemo memo && memo.matches(this.name, this.properties, this.hash);
-        }
-    }
-
-    private static final class PropertyMemo {
-
-        private final String name;
-        private final String[] keys;
-        private final String[] values;
-        private final int hash;
-
-        private PropertyMemo(final String name, final String[] keys, final String[] values, final int hash) {
-            this.name = name;
-            this.keys = keys;
-            this.values = values;
-            this.hash = hash;
-        }
-
-        private boolean matches(final String name, final CompoundTag properties, final int hash) {
-            if (this.hash != hash || this.keys.length != properties.size() || !this.name.equals(name)) {
-                return false;
-            }
-            for (int i = 0; i < this.keys.length; ++i) {
-                if (!this.values[i].equals(properties.getStringOr(this.keys[i], ""))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        @Override
-        public int hashCode() {
-            return this.hash;
-        }
-
-        @Override
-        public boolean equals(final Object other) {
-            if (other instanceof final PropertyProbe probe) {
-                return this.matches(probe.name, probe.properties, probe.hash);
-            }
-            if (!(other instanceof final PropertyMemo memo)
-                || this.hash != memo.hash
-                || this.keys.length != memo.keys.length
-                || !this.name.equals(memo.name)) {
-                return false;
-            }
-            for (int i = 0; i < this.keys.length; ++i) {
-                if (!this.values[i].equals(memo.valueOf(this.keys[i]))) {
-                    return false;
-                }
-            }
-            return true;
-        }
-
-        private String valueOf(final String key) {
-            for (int i = 0; i < this.keys.length; ++i) {
-                if (this.keys[i].equals(key)) {
-                    return this.values[i];
-                }
-            }
-            return "";
-        }
+    private static long mix(long value) {
+        value = (value ^ (value >>> 30)) * 0xBF58476D1CE4E5B9L;
+        value = (value ^ (value >>> 27)) * 0x94D049BB133111EBL;
+        return value ^ (value >>> 31);
     }
 
     /**
@@ -448,23 +375,121 @@ final class LodSectionCodec {
         }
 
         void unpack(final int[] out) {
+            this.scan(out, true, null, false, null);
+        }
+
+        int scan(
+            final int[] out,
+            final boolean store,
+            final int @Nullable [] paletteFlags,
+            final boolean count,
+            final int @Nullable [] opaque
+        ) {
+            final int entryCount = this.entryCount;
+            final boolean mask = opaque != null;
+            int nonEmpty = 0;
+            int fluids = 0;
+
             final long[] data = this.storage;
             if (data == null) {
-                Arrays.fill(out, 0, this.entryCount, 0);
-                return;
+                if (store) {
+                    Arrays.fill(out, 0, entryCount, 0);
+                }
+                if (count || mask) {
+                    final int flags = paletteFlags[0];
+                    if (count) {
+                        if ((flags & FLAG_AIR) == 0) {
+                            nonEmpty = entryCount;
+                        }
+                        if ((flags & FLAG_FLUID) != 0) {
+                            fluids = entryCount;
+                        }
+                    }
+                    if (mask && (flags & FLAG_OCCLUDES) != 0) {
+                        Arrays.fill(opaque, 0, entryCount >> 4, 0xFFFF);
+                    }
+                }
+                return count ? (nonEmpty << 16) | fluids : 0;
             }
 
             final int bits = this.storageBits;
+            if (bits == 4 && entryCount == BLOCK_ENTRIES && data.length >= 256) {
+                return scanNibbles(data, out, store, paletteFlags, count, opaque);
+            }
+
             final int perLong = 64 / bits;
-            final long mask = (1L << bits) - 1L;
+            final long bitMask = (1L << bits) - 1L;
+            final boolean inspect = count || mask;
 
             int index = 0;
-            for (int word = 0, words = data.length; word < words && index < this.entryCount; ++word) {
+            for (int word = 0, words = data.length; word < words && index < entryCount; ++word) {
                 final long packed = data[word];
-                for (int offset = 0; offset < perLong && index < this.entryCount; ++offset) {
-                    out[index++] = (int) ((packed >>> (offset * bits)) & mask);
+                for (int offset = 0; offset < perLong && index < entryCount; ++offset) {
+                    final int local = (int) ((packed >>> (offset * bits)) & bitMask);
+                    if (store) {
+                        out[index] = local;
+                    }
+                    if (inspect) {
+                        final int flags = paletteFlags[local];
+                        if (count) {
+                            if ((flags & FLAG_AIR) == 0) {
+                                ++nonEmpty;
+                            }
+                            if ((flags & FLAG_FLUID) != 0) {
+                                ++fluids;
+                            }
+                        }
+                        if (mask && (flags & FLAG_OCCLUDES) != 0) {
+                            opaque[index >> 4] |= 1 << (index & 15);
+                        }
+                    }
+                    ++index;
                 }
             }
+            return count ? (nonEmpty << 16) | fluids : 0;
+        }
+
+        private int scanNibbles(
+            final long[] data,
+            final int[] out,
+            final boolean store,
+            final int @Nullable [] paletteFlags,
+            final boolean count,
+            final int @Nullable [] opaque
+        ) {
+            final boolean mask = opaque != null;
+            final boolean inspect = count || mask;
+            int nonEmpty = 0;
+            int fluids = 0;
+            for (int row = 0; row < 256; ++row) {
+                final long packed = data[row];
+                final int base = row << 4;
+                int rowMask = 0;
+                for (int x = 0; x < 16; ++x) {
+                    final int local = (int) ((packed >>> (x << 2)) & 15);
+                    if (store) {
+                        out[base + x] = local;
+                    }
+                    if (inspect) {
+                        final int flags = paletteFlags[local];
+                        if (count) {
+                            if ((flags & FLAG_AIR) == 0) {
+                                ++nonEmpty;
+                            }
+                            if ((flags & FLAG_FLUID) != 0) {
+                                ++fluids;
+                            }
+                        }
+                        if (mask && (flags & FLAG_OCCLUDES) != 0) {
+                            rowMask |= 1 << x;
+                        }
+                    }
+                }
+                if (mask) {
+                    opaque[row] = rowMask;
+                }
+            }
+            return count ? (nonEmpty << 16) | fluids : 0;
         }
 
         // the packed entries are already in wire form, so only the palette is rewritten

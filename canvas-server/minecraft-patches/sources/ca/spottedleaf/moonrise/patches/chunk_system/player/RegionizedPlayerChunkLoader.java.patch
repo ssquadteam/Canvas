@@ -334,7 +334,7 @@
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1096,6 +_,237 @@
+@@ -1096,6 +_,229 @@
  
              // now all tickets should be removed, which is all of our external state
          }
@@ -431,21 +431,14 @@
 +                return;
 +            }
 +
-+            ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.loadDataAsync(
-+                this.world, chunkX, chunkZ,
-+                ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionFileType.CHUNK_DATA,
-+                false, Priority.LOW
-+            ).whenComplete((final net.minecraft.nbt.CompoundTag tag, final Throwable thrown) -> {
-+                if (thrown != null || tag == null) {
-+                    cache.putMissing(chunkKey, cutoffY, hollow);
-+                    this.lodResults.add(new LodResult(chunkKey, truncated, null));
-+                    return;
-+                }
-+
-+                // parse and re-serialize off the region tick thread
-+                ((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().compressionExecutor.queueTask(() -> {
++            io.canvasmc.canvas.chunk.lod.LodChunkNbt.load(
++                this.world, chunkX, chunkZ, cutoffY, Priority.LOW,
++                (final net.minecraft.nbt.CompoundTag tag, final Throwable thrown) -> {
 +                    net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet = null;
 +                    try {
++                        if (thrown != null || tag == null) {
++                            return;
++                        }
 +                        final byte[] encoded = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.encode(
 +                            this.world, tag, new ChunkPos(chunkX, chunkZ), cutoffY, hollow,
 +                            io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
@@ -456,14 +449,13 @@
 +                            cache.put(chunkKey, cutoffY, hollow, packet, encoded.length);
 +                        }
 +                    } finally {
-+                        // the result has to be posted on every path, it is what takes the column out of lodInflight
 +                        if (packet == null) {
 +                            cache.putMissing(chunkKey, cutoffY, hollow);
 +                        }
 +                        this.lodResults.add(new LodResult(chunkKey, truncated, packet));
 +                    }
-+                }, Priority.LOW);
-+            });
++                }
++            );
 +        }
 +
 +        private void drainLodResults() {
