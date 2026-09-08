@@ -36,6 +36,7 @@ public final class LodChunkSystem implements LodChunkService {
 
     public static final int MAX_INFLIGHT_PER_PLAYER = 48;
     public static final int MAX_SENDS_PER_TICK = 48;
+    public static final int MAX_READY_PER_PLAYER = 256;
 
     private static final int UNSET = -1;
 
