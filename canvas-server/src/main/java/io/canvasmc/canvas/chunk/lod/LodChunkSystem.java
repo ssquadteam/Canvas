@@ -416,6 +416,15 @@ public final class LodChunkSystem implements LodChunkService {
         return total;
     }
 
+    @Override
+    public long cachedBytes() {
+        long total = 0L;
+        for (final World world : Bukkit.getWorlds()) {
+            total += level(world).canvasLodCache().bytes();
+        }
+        return total;
+    }
+
     private static int checkViewDistance(final int viewDistance) {
         if (viewDistance < 0) {
             throw new IllegalArgumentException("LOD view distance must be greater than or equal to 0, got " + viewDistance);

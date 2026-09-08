@@ -3,6 +3,9 @@ package io.canvasmc.canvas.chunk.lod;
 import ca.spottedleaf.moonrise.patches.starlight.util.SaveUtil;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -63,6 +66,8 @@ public final class LodChunkEncoder {
     static {
         Arrays.fill(ALL_OPAQUE, ROW_MASK);
     }
+
+    private static final VarHandle LIGHT_VIEW = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.nativeOrder());
 
     private static final ThreadLocal<Section[]> SECTIONS = new ThreadLocal<>();
     private static final ThreadLocal<ByteBuf> SECTION_BYTES = ThreadLocal.withInitial(() -> Unpooled.buffer(4096));
@@ -270,6 +275,8 @@ public final class LodChunkEncoder {
             }
         }
 
+        final int skyOmitFrom = fullSkyRun(sections, sectionCount);
+
         boolean anyVisible = false;
         for (int index = 0; index < sectionCount; ++index) {
             final Section section = sections[index];
@@ -287,7 +294,7 @@ public final class LodChunkEncoder {
             if (section.truncated || (empty && section.present)) {
                 lights.markEmpty(lightIndex);
             } else {
-                lights.add(lightIndex, section);
+                lights.add(lightIndex, section, index >= skyOmitFrom);
             }
         }
 
@@ -328,6 +335,44 @@ public final class LodChunkEncoder {
             Heightmap.Types.STREAM_CODEC.encode(buf, entry.getKey());
             ByteBufCodecs.LONG_ARRAY.encode(buf, entry.getValue());
         }
+    }
+
+    /**
+     * Index of the lowest section in the run of full sky light reaching the top of the column, or the section count
+     * when there is none.
+     * <p>
+     * Sky light above terrain is 2048 bytes of {@code 0xFF} per section and is most of an LOD packet. Sending no bit
+     * leaves the client's own storage to answer 15 above the highest section it was given data for, which is what
+     * vanilla already relies on wherever the light engine has no nibble. The run must be unbroken from the top, or
+     * that highest section lands below real terrain and the column goes dark.
+     */
+    private static int fullSkyRun(final Section[] sections, final int sectionCount) {
+        int from = sectionCount;
+        for (int index = sectionCount - 1; index >= 0; --index) {
+            final Section section = sections[index];
+            final byte[] sky = section.skyLight;
+            if (sky == null) {
+                if (lightKind(null, section.skyState) != LIGHT_NONE) {
+                    break;
+                }
+            } else if (!isFull(sky)) {
+                break;
+            }
+            from = index;
+        }
+        return from;
+    }
+
+    static boolean isFull(final byte[] light) {
+        if (light.length != LIGHT_LAYER_BYTES) {
+            return false;
+        }
+        for (int offset = 0; offset < LIGHT_LAYER_BYTES; offset += Long.BYTES) {
+            if ((long) LIGHT_VIEW.get(light, offset) != -1L) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // a block is buried when every neighbour hides it. a face on this column's edge is exposed: we do not have
@@ -399,7 +444,6 @@ public final class LodChunkEncoder {
         private boolean truncated;
         private boolean hasBiomes;
         private boolean modified;
-        private boolean valuesReady;
         private int nonEmpty;
         private int fluids;
 
@@ -413,7 +457,6 @@ public final class LodChunkEncoder {
             this.truncated = false;
             this.hasBiomes = false;
             this.modified = false;
-            this.valuesReady = false;
             this.nonEmpty = 0;
             this.fluids = 0;
             this.skyLight = null;
@@ -469,11 +512,11 @@ public final class LodChunkEncoder {
             }
 
             final boolean maskBlocks = hollow && occluding != 0 && occluding != paletteSize;
-            final boolean store = this.blocks.globalPalette;
+            // nothing occludes, so nothing can be buried and the values are never read
+            final boolean store = this.blocks.globalPalette || (hollow && occluding != 0);
             if (countsFromPalette && !maskBlocks) {
                 if (store) {
                     this.blocks.unpack(this.values);
-                    this.valuesReady = true;
                 }
                 return;
             }
@@ -485,7 +528,6 @@ public final class LodChunkEncoder {
                 !countsFromPalette,
                 maskBlocks ? this.opaque : null
             );
-            this.valuesReady = store;
             if (!countsFromPalette) {
                 this.nonEmpty = counted >>> 16;
                 this.fluids = counted & 0xFFFF;
@@ -503,13 +545,6 @@ public final class LodChunkEncoder {
 
             for (int row = 0; row < ROWS; ++row) {
                 int covered = coveredRow(opaque, row, below, above);
-                if (covered == 0) {
-                    continue;
-                }
-                if (!this.valuesReady) {
-                    this.blocks.unpack(this.values);
-                    this.valuesReady = true;
-                }
 
                 while (covered != 0) {
                     final int x = Integer.numberOfTrailingZeros(covered);
@@ -618,13 +653,13 @@ public final class LodChunkEncoder {
             this.emptyBlockYMask.set(index);
         }
 
-        private void add(final int index, final Section section) {
+        private void add(final int index, final Section section, final boolean omitSky) {
             if (!this.sendLight) {
                 this.markEmpty(index);
                 return;
             }
 
-            switch (lightKind(section.skyLight, section.skyState)) {
+            switch (omitSky ? LIGHT_NONE : lightKind(section.skyLight, section.skyState)) {
                 case LIGHT_DATA -> {
                     this.skyYMask.set(index);
                     this.skyUpdates.add(sized(section.skyLight));

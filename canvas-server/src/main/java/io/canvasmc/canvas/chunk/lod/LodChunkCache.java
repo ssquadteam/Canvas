@@ -77,6 +77,10 @@ public final class LodChunkCache {
         return this.entries.size();
     }
 
+    public long bytes() {
+        return this.bytes.get();
+    }
+
     private void store(final Key key, final Entry entry) {
         final Entry previous = this.entries.put(key, entry);
         long delta = entry.bytes;

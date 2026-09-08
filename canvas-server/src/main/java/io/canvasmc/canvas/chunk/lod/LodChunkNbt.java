@@ -5,13 +5,16 @@ import ca.spottedleaf.concurrentutil.util.Priority;
 import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
 import ca.spottedleaf.moonrise.patches.chunk_system.level.ChunkSystemServerLevel;
 import ca.spottedleaf.moonrise.patches.starlight.util.SaveUtil;
-import java.io.ByteArrayInputStream;
 import java.io.DataInput;
 import java.io.DataInputStream;
+import java.io.EOFException;
 import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
+import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.function.BiConsumer;
 import java.util.zip.DataFormatException;
@@ -106,7 +109,7 @@ public final class LodChunkNbt {
     }
 
     private static @Nullable CompoundTag read(final ByteSlice slice, final int chunkX, final int chunkZ, final int cutoffY) throws IOException {
-        return read((DataInput) new DataInputStream(new ByteArrayInputStream(slice.bytes, 0, slice.length)), chunkX, chunkZ, cutoffY);
+        return read(new Bytes(slice.bytes, slice.length), chunkX, chunkZ, cutoffY);
     }
 
     private static ByteSlice drain(final InputStream in) throws IOException {
@@ -222,6 +225,109 @@ public final class LodChunkNbt {
             return UNSAFE.objectFieldOffset(FilterInputStream.class.getDeclaredField("in"));
         } catch (final Throwable ignored) {
             return -1L;
+        }
+    }
+
+    // the tag walk reads a byte at a time and ByteArrayInputStream#read is synchronized, so it runs off the array
+    private static final class Bytes implements DataInput {
+
+        private static final VarHandle SHORT_VIEW = MethodHandles.byteArrayViewVarHandle(short[].class, ByteOrder.BIG_ENDIAN);
+        private static final VarHandle INT_VIEW = MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.BIG_ENDIAN);
+        private static final VarHandle LONG_VIEW = MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.BIG_ENDIAN);
+
+        private final byte[] bytes;
+        private final int limit;
+        private int pos;
+
+        private Bytes(final byte[] bytes, final int limit) {
+            this.bytes = bytes;
+            this.limit = limit;
+        }
+
+        private int take(final int length) throws EOFException {
+            final int at = this.pos;
+            if (length < 0 || length > this.limit - at) {
+                throw new EOFException();
+            }
+            this.pos = at + length;
+            return at;
+        }
+
+        @Override
+        public void readFully(final byte[] into) throws IOException {
+            this.readFully(into, 0, into.length);
+        }
+
+        @Override
+        public void readFully(final byte[] into, final int offset, final int length) throws IOException {
+            System.arraycopy(this.bytes, this.take(length), into, offset, length);
+        }
+
+        // a short skip past the end is corrupt data, not a partial read, so it fails rather than misaligning the walk
+        @Override
+        public int skipBytes(final int length) throws IOException {
+            this.take(length);
+            return length;
+        }
+
+        @Override
+        public boolean readBoolean() throws IOException {
+            return this.readByte() != 0;
+        }
+
+        @Override
+        public byte readByte() throws IOException {
+            return this.bytes[this.take(1)];
+        }
+
+        @Override
+        public int readUnsignedByte() throws IOException {
+            return this.readByte() & 0xFF;
+        }
+
+        @Override
+        public short readShort() throws IOException {
+            return (short) SHORT_VIEW.get(this.bytes, this.take(2));
+        }
+
+        @Override
+        public int readUnsignedShort() throws IOException {
+            return this.readShort() & 0xFFFF;
+        }
+
+        @Override
+        public char readChar() throws IOException {
+            return (char) this.readShort();
+        }
+
+        @Override
+        public int readInt() throws IOException {
+            return (int) INT_VIEW.get(this.bytes, this.take(4));
+        }
+
+        @Override
+        public long readLong() throws IOException {
+            return (long) LONG_VIEW.get(this.bytes, this.take(8));
+        }
+
+        @Override
+        public float readFloat() throws IOException {
+            return Float.intBitsToFloat(this.readInt());
+        }
+
+        @Override
+        public double readDouble() throws IOException {
+            return Double.longBitsToDouble(this.readLong());
+        }
+
+        @Override
+        public String readLine() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public String readUTF() throws IOException {
+            return DataInputStream.readUTF(this);
         }
     }
 

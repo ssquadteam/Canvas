@@ -126,4 +126,9 @@ public interface LodChunkService {
     void invalidateCache(final World world, final int chunkX, final int chunkZ);
 
     int cachedColumns();
+
+    /**
+     * Encoded size of the cached columns, for sizing the cache against a real ring rather than a guess.
+     */
+    long cachedBytes();
 }
