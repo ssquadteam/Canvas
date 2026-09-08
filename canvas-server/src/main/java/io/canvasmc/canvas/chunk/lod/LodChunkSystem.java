@@ -38,7 +38,7 @@ public final class LodChunkSystem implements LodChunkService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("CanvasLOD");
 
-    public static final int MAX_INFLIGHT_PER_PLAYER = 48;
+    public static final int MAX_INFLIGHT_PER_PLAYER = 64;
     public static final int MAX_SENDS_PER_TICK = 48;
     public static final int MAX_READY_PER_PLAYER = 256;
 

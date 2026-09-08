@@ -19,6 +19,7 @@
 +        private final LongOpenHashSet lodInflight = new LongOpenHashSet();
 +        private final java.util.concurrent.ConcurrentLinkedQueue<LodResult> lodResults = new java.util.concurrent.ConcurrentLinkedQueue<>();
 +        private final java.util.List<LodResult> lodReady = new java.util.ArrayList<>();
++        private final LongOpenHashSet lodReadyKeys = new LongOpenHashSet();
 +        private final java.util.Comparator<LodResult> lodReadyOrder = (final LodResult first, final LodResult second) ->
 +            Long.compare(this.chunkDistanceSq(first.chunkKey()), this.chunkDistanceSq(second.chunkKey()));
 +        private volatile boolean lodRefreshRequested;
@@ -296,7 +297,8 @@
 +                    }
 +
 +                    final long chunk = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+                    if (this.lodChunks.get(chunk) != LOD_STATE_NONE || this.sentChunks.contains(chunk) || this.lodInflight.contains(chunk)) {
++                    if (this.lodChunks.get(chunk) != LOD_STATE_NONE || this.sentChunks.contains(chunk)
++                        || this.lodInflight.contains(chunk) || this.lodReadyKeys.contains(chunk)) {
 +                        continue;
 +                    }
 +
@@ -325,6 +327,7 @@
 +            this.lodInflight.clear();
 +            this.lodResults.clear();
 +            this.lodReady.clear();
++            this.lodReadyKeys.clear();
 +            this.lodChunks.clear();
 +            // Canvas end - native LOD chunks
 +
@@ -375,22 +378,40 @@
 +                this.lodInflight.clear();
 +                this.lodResults.clear();
 +                this.lodReady.clear();
++                this.lodReadyKeys.clear();
 +                return;
 +            }
 +
 +            this.drainLodResults();
 +
++            // a full ready list used to stop encodes; while flying that pile is behind the player and the front stays empty
++            this.trimLodReady();
 +            int budget = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_INFLIGHT_PER_PLAYER - this.lodInflight.size();
-+            if (this.lodReady.size() >= io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_READY_PER_PLAYER) {
-+                budget = 0;
-+            }
 +            while (budget > 0 && !this.lodQueue.isEmpty()) {
 +                final long chunkKey = this.lodQueue.dequeueLong();
-+                if (!this.wantLod(chunkKey) || !this.lodInflight.add(chunkKey)) {
++                if (!this.wantLod(chunkKey) || this.lodReadyKeys.contains(chunkKey) || !this.lodInflight.add(chunkKey)) {
 +                    continue;
 +                }
 +                --budget;
 +                this.requestLod(chunkKey);
++            }
++            // cache hits are posted on this thread, so they can leave in the same tick
++            this.drainLodResults();
++        }
++
++        private void trimLodReady() {
++            final int max = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_READY_PER_PLAYER;
++            if (this.lodReady.size() <= max) {
++                return;
++            }
++
++            this.lodReady.sort(this.lodReadyOrder);
++            for (int i = this.lodReady.size() - 1; i >= max; --i) {
++                final LodResult extra = this.lodReady.remove(i);
++                this.lodReadyKeys.remove(extra.chunkKey());
++                if (this.wantLod(extra.chunkKey())) {
++                    this.lodQueue.enqueue(extra.chunkKey());
++                }
 +            }
 +        }
 +
@@ -459,7 +480,9 @@
 +                    continue;
 +                }
 +
-+                this.lodReady.add(result);
++                if (this.lodReadyKeys.add(result.chunkKey())) {
++                    this.lodReady.add(result);
++                }
 +            }
 +
 +            if (this.lodReady.isEmpty()) {
@@ -475,9 +498,11 @@
 +            for (int i = 0; i < size; ++i) {
 +                final LodResult ready = this.lodReady.get(i);
 +                if (!this.wantLod(ready.chunkKey())) {
++                    this.lodReadyKeys.remove(ready.chunkKey());
 +                    continue;
 +                }
 +                if ((toSend == null || toSend.size() < sendBudget) && this.clientHoldsNeighbor(ready.chunkKey())) {
++                    this.lodReadyKeys.remove(ready.chunkKey());
 +                    this.lodChunks.put(ready.chunkKey(), ready.truncated() ? LOD_STATE_TRUNCATED : LOD_STATE_DISK);
 +                    if (toSend == null) {
 +                        toSend = new java.util.ArrayList<>(sendBudget);
