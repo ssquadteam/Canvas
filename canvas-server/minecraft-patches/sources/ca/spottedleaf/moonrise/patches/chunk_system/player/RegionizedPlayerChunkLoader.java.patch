@@ -382,8 +382,7 @@
 +
 +            int budget = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_INFLIGHT_PER_PLAYER - this.lodInflight.size();
 +            if (this.lodReady.size() >= io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_READY_PER_PLAYER) {
-+                // hold the backlog, but never stop entirely: the held columns are waiting on a closer one to be read
-+                budget = this.lodInflight.isEmpty() ? 1 : 0;
++                budget = 0;
 +            }
 +            while (budget > 0 && !this.lodQueue.isEmpty()) {
 +                final long chunkKey = this.lodQueue.dequeueLong();
@@ -467,36 +466,29 @@
 +                return;
 +            }
 +
-+            // encoding finishes out of order, and the client's render graph only walks through chunks it already holds,
-+            // so a column past a gap stays unbuilt until the player moves
-+            final long frontier = this.lodSendFrontier();
 +            this.lodReady.sort(this.lodReadyOrder);
 +
 +            java.util.List<net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket> toSend = null;
-+            int taken = 0;
-+            for (int size = this.lodReady.size(); taken < size; ) {
-+                final LodResult ready = this.lodReady.get(taken);
-+                if (this.chunkDistanceSq(ready.chunkKey()) > frontier) {
-+                    break;
-+                }
-+
-+                ++taken;
++            int kept = 0;
++            final int size = this.lodReady.size();
++            final int sendBudget = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_SENDS_PER_TICK;
++            for (int i = 0; i < size; ++i) {
++                final LodResult ready = this.lodReady.get(i);
 +                if (!this.wantLod(ready.chunkKey())) {
 +                    continue;
 +                }
-+
-+                this.lodChunks.put(ready.chunkKey(), ready.truncated() ? LOD_STATE_TRUNCATED : LOD_STATE_DISK);
-+                if (toSend == null) {
-+                    toSend = new java.util.ArrayList<>();
++                if ((toSend == null || toSend.size() < sendBudget) && this.clientHoldsNeighbor(ready.chunkKey())) {
++                    this.lodChunks.put(ready.chunkKey(), ready.truncated() ? LOD_STATE_TRUNCATED : LOD_STATE_DISK);
++                    if (toSend == null) {
++                        toSend = new java.util.ArrayList<>(sendBudget);
++                    }
++                    toSend.add(ready.packet());
++                    continue;
 +                }
-+                toSend.add(ready.packet());
-+                if (toSend.size() >= io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_SENDS_PER_TICK) {
-+                    break;
-+                }
++                this.lodReady.set(kept++, ready);
 +            }
-+
-+            if (taken != 0) {
-+                this.lodReady.subList(0, taken).clear();
++            if (kept != size) {
++                this.lodReady.subList(kept, size).clear();
 +            }
 +            if (toSend == null) {
 +                return;
@@ -516,35 +508,20 @@
 +            return (dx * dx) + (dz * dz);
 +        }
 +
-+        // the closest column the client is still owed, from either ring
-+        private long lodSendFrontier() {
-+            long frontier = Math.min(this.nearestPendingSend(this.sendQueue), this.nearestPendingSend(this.generatingQueue));
-+            frontier = Math.min(frontier, this.nearestPendingSend(this.genQueue));
-+            frontier = Math.min(frontier, this.nearestPendingSend(this.loadingQueue));
-+            frontier = Math.min(frontier, this.nearestPendingSend(this.loadQueue));
-+
-+            if (!this.lodQueue.isEmpty()) {
-+                frontier = Math.min(frontier, this.chunkDistanceSq(this.lodQueue.firstLong()));
-+            }
-+            for (final it.unimi.dsi.fastutil.longs.LongIterator iterator = this.lodInflight.iterator(); iterator.hasNext();) {
-+                frontier = Math.min(frontier, this.chunkDistanceSq(iterator.nextLong()));
-+            }
-+
-+            return frontier;
++        private boolean clientHoldsNeighbor(final long chunkKey) {
++            final int chunkX = CoordinateUtils.getChunkX(chunkKey);
++            final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
++            return this.clientHolds(chunkX - 1, chunkZ) || this.clientHolds(chunkX + 1, chunkZ)
++                || this.clientHolds(chunkX, chunkZ - 1) || this.clientHolds(chunkX, chunkZ + 1);
 +        }
 +
-+        // these queues run past the send view, and a chunk the client is never given cannot leave a gap
-+        private long nearestPendingSend(final LongHeapPriorityQueue queue) {
-+            if (queue.isEmpty()) {
-+                return Long.MAX_VALUE;
++        private boolean clientHolds(final int chunkX, final int chunkZ) {
++            final long key = CoordinateUtils.getChunkKey(chunkX, chunkZ);
++            if (this.sentChunks.contains(key)) {
++                return true;
 +            }
-+
-+            final long chunkKey = queue.firstLong();
-+            final int squareDistance = Math.max(
-+                Math.abs(CoordinateUtils.getChunkX(chunkKey) - this.lastChunkX),
-+                Math.abs(CoordinateUtils.getChunkZ(chunkKey) - this.lastChunkZ)
-+            );
-+            return squareDistance <= (this.lastSendDistance + 1) ? this.chunkDistanceSq(chunkKey) : Long.MAX_VALUE;
++            final byte state = this.lodChunks.get(key);
++            return state == LOD_STATE_DISK || state == LOD_STATE_TRUNCATED || state == LOD_STATE_REAL;
 +        }
 +
 +        public int canvas$getAdvertisedRadius() {
