@@ -326,7 +326,7 @@
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1096,6 +_,162 @@
+@@ -1096,6 +_,165 @@
  
              // now all tickets should be removed, which is all of our external state
          }
@@ -409,21 +409,24 @@
 +
 +                // parse and re-serialize off the region tick thread
 +                ((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().compressionExecutor.queueTask(() -> {
-+                    final byte[] encoded = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.encode(
-+                        this.world, tag, new ChunkPos(chunkX, chunkZ), cutoffY, hollow,
-+                        io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
-+                        io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendBlockLight(this.world)
-+                    );
-+                    if (encoded == null) {
-+                        cache.putMissing(chunkKey, cutoffY, hollow);
-+                        this.lodResults.add(new LodResult(chunkKey, truncated, null));
-+                        return;
++                    net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet = null;
++                    try {
++                        final byte[] encoded = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.encode(
++                            this.world, tag, new ChunkPos(chunkX, chunkZ), cutoffY, hollow,
++                            io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
++                            io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendBlockLight(this.world)
++                        );
++                        if (encoded != null) {
++                            packet = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.decode(this.world, encoded);
++                            cache.put(chunkKey, cutoffY, hollow, packet, encoded.length);
++                        }
++                    } finally {
++                        // the result has to be posted on every path, it is what takes the column out of lodInflight
++                        if (packet == null) {
++                            cache.putMissing(chunkKey, cutoffY, hollow);
++                        }
++                        this.lodResults.add(new LodResult(chunkKey, truncated, packet));
 +                    }
-+
-+                    final net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet =
-+                        io.canvasmc.canvas.chunk.lod.LodChunkEncoder.decode(this.world, encoded);
-+                    cache.put(chunkKey, cutoffY, hollow, packet, encoded.length);
-+                    this.lodResults.add(new LodResult(chunkKey, truncated, packet));
 +                }, Priority.LOW);
 +            });
 +        }

@@ -2,30 +2,32 @@ package io.canvasmc.canvas.chunk.lod;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import it.unimi.dsi.fastutil.objects.Reference2BooleanOpenHashMap;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
+import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import net.minecraft.core.Holder;
+import net.minecraft.core.IdMap;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.Registries;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.RegistryFriendlyByteBuf;
 import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.server.level.ServerLevel;
-import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.ChunkPos;
-import net.minecraft.world.level.EmptyBlockGetter;
-import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.chunk.DataLayer;
-import net.minecraft.world.level.chunk.LevelChunkSection;
-import net.minecraft.world.level.chunk.PalettedContainer;
+import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.levelgen.Heightmap;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Encodes region file NBT straight to packet bytes, never building a
@@ -38,21 +40,30 @@ public final class LodChunkEncoder {
     public static final int NO_CUTOFF = Integer.MIN_VALUE;
 
     static final int SECTION_HEIGHT = 16;
-    private static final int SECTION_VOLUME = SECTION_HEIGHT * SECTION_HEIGHT * SECTION_HEIGHT;
+    private static final int SECTION_VOLUME = LodSectionCodec.BLOCK_ENTRIES;
     private static final int MASK_WORDS = SECTION_VOLUME >> 6;
     private static final int LIGHT_LAYER_BYTES = 2048;
-    private static final BlockState AIR = Blocks.AIR.defaultBlockState();
+
+    private static final Logger LOGGER = LoggerFactory.getLogger("CanvasLOD");
+
+    // starlight save states, see SWMRNibbleArray
+    private static final int LIGHT_STATE_UNKNOWN = -1;
+    private static final int LIGHT_STATE_UNINIT = 1;
+    private static final int LIGHT_STATE_HIDDEN = 3;
+
+    private static final int LIGHT_NONE = 0;
+    private static final int LIGHT_EMPTY = 1;
+    private static final int LIGHT_DATA = 2;
 
     // outside the world below the build limit counts as opaque
     private static final long[] ALL_OPAQUE = new long[MASK_WORDS];
     static {
-        java.util.Arrays.fill(ALL_OPAQUE, -1L);
+        Arrays.fill(ALL_OPAQUE, -1L);
     }
 
-    private static final ThreadLocal<long[][]> OPAQUE_SCRATCH = new ThreadLocal<>();
+    private static final ThreadLocal<Section[]> SECTIONS = new ThreadLocal<>();
 
-    private static volatile @Nullable PalettedContainerFactory EMPTY_SECTION_FACTORY;
-    private static volatile byte @Nullable [] EMPTY_SECTION_BYTES;
+    private static volatile boolean loggedFailure;
 
     private LodChunkEncoder() {
     }
@@ -70,46 +81,15 @@ public final class LodChunkEncoder {
         final boolean sendLight,
         final boolean sendBlockLight
     ) {
-        final LodChunkData data;
         try {
-            data = LodChunkData.parse(level, tag);
+            return encodeColumn(level, tag, pos, cutoffY, hollow, sendLight, sendBlockLight);
         } catch (final Throwable thrown) {
             // a single corrupt column must not take down the LOD ring
-            return null;
-        }
-
-        if (data == null || !isSendable(data)) {
-            return null;
-        }
-
-        final byte[] emptySection = emptySectionBytes(level.palettedContainerFactory());
-        final ByteBuf sectionBytes = Unpooled.buffer(256);
-        final ByteBuf packetBytes = Unpooled.buffer(512);
-        try {
-            final FriendlyByteBuf sectionBuf = new FriendlyByteBuf(sectionBytes);
-            final LightMasks lights = new LightMasks(level.getSectionsCount() + 2, sendLight, sendBlockLight);
-
-            final Occlusion occlusion = hollow ? Occlusion.forLevel(level) : null;
-
-            if (!writeSections(sectionBuf, level, data, cutoffY, emptySection, lights, occlusion)) {
-                return null;
+            if (!loggedFailure) {
+                loggedFailure = true;
+                LOGGER.warn("Failed to encode LOD column {}, further failures are silent", pos, thrown);
             }
-
-            final RegistryFriendlyByteBuf dataBuf = new RegistryFriendlyByteBuf(packetBytes, level.registryAccess());
-            dataBuf.writeInt(pos.x());
-            dataBuf.writeInt(pos.z());
-            writeHeightmaps(dataBuf, data.heightmaps());
-            dataBuf.writeVarInt(sectionBytes.readableBytes());
-            dataBuf.writeBytes(sectionBytes);
-            dataBuf.writeVarInt(0); // block entities are sent on promotion instead
-            lights.write(dataBuf);
-
-            final byte[] encoded = new byte[packetBytes.readableBytes()];
-            packetBytes.readBytes(encoded);
-            return encoded;
-        } finally {
-            sectionBytes.release();
-            packetBytes.release();
+            return null;
         }
     }
 
@@ -160,152 +140,414 @@ public final class LodChunkEncoder {
             || level.paperConfig().anticheat.antiXray.enabled;
     }
 
+    private static byte @Nullable [] encodeColumn(
+        final ServerLevel level,
+        final CompoundTag tag,
+        final ChunkPos pos,
+        final int cutoffY,
+        final boolean hollow,
+        final boolean sendLight,
+        final boolean sendBlockLight
+    ) {
+        if (tag.getString("Status").isEmpty()) {
+            return null;
+        }
+
+        final ChunkStatus status = tag.read("Status", ChunkStatus.CODEC).orElse(ChunkStatus.EMPTY);
+        final int sectionCount = level.getSectionsCount();
+        final Section[] sections = sections(sectionCount);
+
+        if (!readSections(level, tag, sections, sectionCount)) {
+            return null;
+        }
+        if (!isSendable(status, sections, sectionCount)) {
+            return null;
+        }
+
+        final ByteBuf sectionBytes = Unpooled.buffer(4096);
+        final ByteBuf packetBytes = Unpooled.buffer(8192);
+        try {
+            final FriendlyByteBuf sectionBuf = new FriendlyByteBuf(sectionBytes);
+            final LightMasks lights = new LightMasks(sectionCount + 2, sendLight, sendBlockLight);
+
+            if (!writeSections(sectionBuf, level, sections, sectionCount, cutoffY, hollow, lights)) {
+                return null;
+            }
+
+            final RegistryFriendlyByteBuf dataBuf = new RegistryFriendlyByteBuf(packetBytes, level.registryAccess());
+            dataBuf.writeInt(pos.x());
+            dataBuf.writeInt(pos.z());
+            writeHeightmaps(dataBuf, heightmaps(tag, status));
+            dataBuf.writeVarInt(sectionBytes.readableBytes());
+            dataBuf.writeBytes(sectionBytes);
+            dataBuf.writeVarInt(0); // block entities are sent on promotion instead
+            lights.write(dataBuf);
+
+            final byte[] encoded = new byte[packetBytes.readableBytes()];
+            packetBytes.readBytes(encoded);
+            return encoded;
+        } finally {
+            sectionBytes.release();
+            packetBytes.release();
+        }
+    }
+
+    private static boolean readSections(final ServerLevel level, final CompoundTag tag, final Section[] sections, final int sectionCount) {
+        for (int i = 0; i < sectionCount; ++i) {
+            sections[i].reset();
+        }
+
+        final PalettedContainerFactory factory = level.palettedContainerFactory();
+        final Registry<Biome> biomeRegistry = level.registryAccess().lookupOrThrow(Registries.BIOME);
+        final IdMap<Holder<Biome>> biomeIds = factory.biomeStrategy().globalMap();
+        final LodSectionCodec codec = LodSectionCodec.get();
+
+        final ListTag sectionTags = tag.getListOrEmpty("sections");
+        for (int i = 0, len = sectionTags.size(); i < len; ++i) {
+            final CompoundTag sectionTag = sectionTags.getCompound(i).orElse(null);
+            if (sectionTag == null) {
+                continue;
+            }
+
+            final int index = level.getSectionIndexFromSectionY(sectionTag.getByteOr("Y", (byte) 0));
+            if (index < 0 || index >= sectionCount) {
+                continue;
+            }
+
+            final Section section = sections[index];
+            section.skyLight = sectionTag.getByteArray("SkyLight").orElse(null);
+            section.skyState = sectionTag.getIntOr(
+                ca.spottedleaf.moonrise.patches.starlight.util.SaveUtil.SKYLIGHT_STATE_TAG, LIGHT_STATE_UNKNOWN
+            );
+            section.blockLight = sectionTag.getByteArray("BlockLight").orElse(null);
+            section.blockState = sectionTag.getIntOr(
+                ca.spottedleaf.moonrise.patches.starlight.util.SaveUtil.BLOCKLIGHT_STATE_TAG, LIGHT_STATE_UNKNOWN
+            );
+
+            final CompoundTag biomes = sectionTag.getCompound("biomes").orElse(null);
+            section.hasBiomes = biomes != null && codec.readBiomes(biomes, biomeRegistry, biomeIds, section.biomes);
+
+            final CompoundTag blockStates = sectionTag.getCompound("block_states").orElse(null);
+            if (blockStates == null) {
+                continue;
+            }
+            if (!codec.readBlockStates(blockStates, section.blocks)) {
+                return false;
+            }
+
+            section.present = true;
+            section.decode();
+        }
+
+        return true;
+    }
+
     private static boolean writeSections(
         final FriendlyByteBuf out,
         final ServerLevel level,
-        final LodChunkData data,
+        final Section[] sections,
+        final int sectionCount,
         final int cutoffY,
-        final byte[] emptySection,
-        final LightMasks lights,
-        final @Nullable Occlusion occlusion
+        final boolean hollow,
+        final LightMasks lights
     ) {
-        final int sectionCount = level.getSectionsCount();
-        final LevelChunkSection[] bySectionIndex = data.sections();
+        final PalettedContainerFactory factory = level.palettedContainerFactory();
+        final int defaultBiome = factory.biomeStrategy().globalMap().getId(factory.defaultBiome());
 
-        long[][] opaque = null;
-        if (occlusion != null) {
-            opaque = opaqueScratch(sectionCount);
-            for (int sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex) {
-                final int sectionMinY = level.getSectionYFromSectionIndex(sectionIndex) * SECTION_HEIGHT;
+        if (hollow) {
+            final boolean lavaOccludes = level.paperConfig().anticheat.antiXray.lavaObscures;
+            for (int index = 0; index < sectionCount; ++index) {
+                final int sectionMinY = level.getSectionYFromSectionIndex(index) * SECTION_HEIGHT;
                 // a truncated section goes out empty, so nothing above it may count it as cover
-                final LevelChunkSection chunkSection = sectionMinY + (SECTION_HEIGHT - 1) < cutoffY
-                    ? null
-                    : bySectionIndex[sectionIndex];
-                fillOpaque(chunkSection, opaque[sectionIndex], occlusion);
+                final boolean truncated = sectionMinY + (SECTION_HEIGHT - 1) < cutoffY;
+                sections[index].fillOpaque(truncated, lavaOccludes);
+            }
+
+            for (int index = 0; index < sectionCount; ++index) {
+                sections[index].hollow(
+                    index > 0 ? sections[index - 1].opaque : ALL_OPAQUE,
+                    index + 1 < sectionCount ? sections[index + 1].opaque : null
+                );
             }
         }
 
         boolean anyVisible = false;
-        for (int sectionIndex = 0; sectionIndex < sectionCount; ++sectionIndex) {
-            final int sectionMinY = level.getSectionYFromSectionIndex(sectionIndex) * SECTION_HEIGHT;
-            final int lightIndex = sectionIndex + 1; // light masks start one section below the world
+        for (int index = 0; index < sectionCount; ++index) {
+            final Section section = sections[index];
+            final int sectionMinY = level.getSectionYFromSectionIndex(index) * SECTION_HEIGHT;
+            final int lightIndex = index + 1; // light masks start one section below the world
 
-            if (sectionMinY + (SECTION_HEIGHT - 1) < cutoffY) {
-                out.writeBytes(emptySection);
-                lights.markEmpty(lightIndex);
-                continue;
-            }
+            final boolean truncated = sectionMinY + (SECTION_HEIGHT - 1) < cutoffY;
+            final boolean empty = truncated || !section.present || section.nonEmpty == 0;
 
-            LevelChunkSection chunkSection = bySectionIndex[sectionIndex];
-            if (chunkSection != null && opaque != null) {
-                chunkSection = hollowSection(
-                    chunkSection,
-                    opaque[sectionIndex],
-                    sectionIndex > 0 ? opaque[sectionIndex - 1] : ALL_OPAQUE,
-                    sectionIndex + 1 < sectionCount ? opaque[sectionIndex + 1] : null
-                );
-            }
-
-            final boolean empty = chunkSection == null || chunkSection.hasOnlyAir();
             if (empty) {
-                out.writeBytes(emptySection);
+                section.writeEmpty(out, defaultBiome);
             } else {
-                chunkSection.write(out, null, sectionIndex);
+                section.write(out, defaultBiome);
                 anyVisible = true;
             }
 
-            // a section hollowing emptied was fully buried, so its light was already zero
-            if (bySectionIndex[sectionIndex] == null || (empty && opaque != null)) {
+            // a section hollowing or the cutoff emptied was fully buried, so its light was already zero
+            if (empty && section.present) {
                 lights.markEmpty(lightIndex);
             } else {
-                lights.add(lightIndex, data.skyLight()[sectionIndex], data.blockLight()[sectionIndex]);
+                lights.add(lightIndex, section);
             }
         }
 
         return anyVisible;
     }
 
-    // one bit per block, set when the block hides whatever is behind it
-    private static void fillOpaque(final @Nullable LevelChunkSection section, final long[] mask, final Occlusion occlusion) {
-        if (section == null || section.hasOnlyAir()) {
-            java.util.Arrays.fill(mask, 0L);
-            return;
+    private static boolean isSendable(final ChunkStatus status, final Section[] sections, final int sectionCount) {
+        // a column that was never lit renders pitch black, so only accept it if it actually carries light
+        if (status.isOrAfter(ChunkStatus.LIGHT)) {
+            return true;
         }
 
-        // maybeHas only scans the palette, so false here is definitive
-        if (!section.maybeHas((final BlockState state) -> !occlusion.occludes(state))) {
-            java.util.Arrays.fill(mask, -1L);
-            return;
+        for (int i = 0; i < sectionCount; ++i) {
+            if (hasLight(sections[i].skyLight) || hasLight(sections[i].blockLight)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Map<Heightmap.Types, long[]> heightmaps(final CompoundTag tag, final ChunkStatus status) {
+        // only the heightmaps the packet carries, the rest are never written to the wire
+        final EnumMap<Heightmap.Types, long[]> heightmaps = new EnumMap<>(Heightmap.Types.class);
+        tag.getCompound("Heightmaps").ifPresent(compound -> {
+            for (final Heightmap.Types type : status.heightmapsAfter()) {
+                if (type.sendToClient()) {
+                    compound.getLongArray(type.getSerializationKey()).ifPresent(data -> heightmaps.put(type, data));
+                }
+            }
+        });
+        return heightmaps;
+    }
+
+    // mirrors ClientboundLevelChunkPacketData#HEIGHTMAPS_STREAM_CODEC
+    private static void writeHeightmaps(final RegistryFriendlyByteBuf buf, final Map<Heightmap.Types, long[]> heightmaps) {
+        buf.writeVarInt(heightmaps.size());
+        for (final Map.Entry<Heightmap.Types, long[]> entry : heightmaps.entrySet()) {
+            Heightmap.Types.STREAM_CODEC.encode(buf, entry.getKey());
+            ByteBufCodecs.LONG_ARRAY.encode(buf, entry.getValue());
+        }
+    }
+
+    private static Section[] sections(final int sectionCount) {
+        Section[] sections = SECTIONS.get();
+        if (sections == null || sections.length < sectionCount) {
+            sections = new Section[sectionCount];
+            for (int i = 0; i < sectionCount; ++i) {
+                sections[i] = new Section();
+            }
+            SECTIONS.set(sections);
+        }
+        return sections;
+    }
+
+    private static boolean hasLight(final byte @Nullable [] data) {
+        if (data == null) {
+            return false;
+        }
+        for (final byte value : data) {
+            if (value != 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int lightKind(final byte @Nullable [] data, final int state) {
+        // matches SWMRNibbleArray#toVanillaNibble: a hidden or absent nibble sends no bit at all, so the client keeps
+        // its own value rather than being told the section is dark
+        if (state == LIGHT_STATE_HIDDEN) {
+            return LIGHT_NONE;
+        }
+        if (data == null) {
+            return state == LIGHT_STATE_UNKNOWN ? LIGHT_NONE : LIGHT_EMPTY;
+        }
+        return hasLight(data) ? LIGHT_DATA : LIGHT_EMPTY;
+    }
+
+    private static final class Section {
+
+        private final LodSectionCodec.Container blocks = new LodSectionCodec.Container();
+        private final LodSectionCodec.Container biomes = new LodSectionCodec.Container();
+        private final int[] values = new int[SECTION_VOLUME];
+        private final int[] biomeValues = new int[LodSectionCodec.BIOME_ENTRIES];
+        private final long[] opaque = new long[MASK_WORDS];
+
+        private int[] paletteFlags = new int[16];
+
+        private boolean present;
+        private boolean hasBiomes;
+        private boolean modified;
+        private int nonEmpty;
+        private int fluids;
+
+        private byte @Nullable [] skyLight;
+        private byte @Nullable [] blockLight;
+        private int skyState;
+        private int blockState;
+
+        private void reset() {
+            this.present = false;
+            this.hasBiomes = false;
+            this.modified = false;
+            this.nonEmpty = 0;
+            this.fluids = 0;
+            this.skyLight = null;
+            this.blockLight = null;
+            this.skyState = LIGHT_STATE_UNKNOWN;
+            this.blockState = LIGHT_STATE_UNKNOWN;
+            Arrays.fill(this.opaque, 0L);
         }
 
-        java.util.Arrays.fill(mask, 0L);
-        for (int y = 0; y < SECTION_HEIGHT; ++y) {
-            for (int z = 0; z < SECTION_HEIGHT; ++z) {
-                for (int x = 0; x < SECTION_HEIGHT; ++x) {
-                    if (occlusion.occludes(section.getBlockState(x, y, z))) {
-                        final int index = maskIndex(x, y, z);
-                        mask[index >> 6] |= 1L << (index & 63);
+        private void decode() {
+            final int paletteSize = this.blocks.paletteSize;
+            if (this.paletteFlags.length < paletteSize) {
+                this.paletteFlags = new int[paletteSize];
+            }
+            for (int i = 0; i < paletteSize; ++i) {
+                this.paletteFlags[i] = LodSectionCodec.stateFlags(this.blocks.palette[i]);
+            }
+
+            this.blocks.unpack(this.values);
+
+            if (paletteSize == 1) {
+                final int flags = this.paletteFlags[0];
+                this.nonEmpty = (flags & LodSectionCodec.FLAG_AIR) != 0 ? 0 : SECTION_VOLUME;
+                this.fluids = (flags & LodSectionCodec.FLAG_FLUID) != 0 ? SECTION_VOLUME : 0;
+                return;
+            }
+
+            int nonEmpty = 0;
+            int fluids = 0;
+            for (int i = 0; i < SECTION_VOLUME; ++i) {
+                final int flags = this.paletteFlags[this.values[i]];
+                if ((flags & LodSectionCodec.FLAG_AIR) == 0) {
+                    ++nonEmpty;
+                }
+                if ((flags & LodSectionCodec.FLAG_FLUID) != 0) {
+                    ++fluids;
+                }
+            }
+            this.nonEmpty = nonEmpty;
+            this.fluids = fluids;
+        }
+
+        // one bit per block, set when the block hides whatever is behind it
+        private void fillOpaque(final boolean truncated, final boolean lavaOccludes) {
+            if (truncated || !this.present || this.nonEmpty == 0) {
+                Arrays.fill(this.opaque, 0L);
+                return;
+            }
+
+            final int paletteSize = this.blocks.paletteSize;
+            int occluding = 0;
+            for (int i = 0; i < paletteSize; ++i) {
+                if (this.occludes(i, lavaOccludes)) {
+                    ++occluding;
+                }
+            }
+
+            if (occluding == 0) {
+                Arrays.fill(this.opaque, 0L);
+                return;
+            }
+            if (occluding == paletteSize) {
+                Arrays.fill(this.opaque, -1L);
+                return;
+            }
+
+            Arrays.fill(this.opaque, 0L);
+            for (int i = 0; i < SECTION_VOLUME; ++i) {
+                if (this.occludes(this.values[i], lavaOccludes)) {
+                    this.opaque[i >> 6] |= 1L << (i & 63);
+                }
+            }
+        }
+
+        // comparing by identity with the default state matches Anti-Xray, only source lava obscures
+        private boolean occludes(final int local, final boolean lavaOccludes) {
+            return (this.paletteFlags[local] & LodSectionCodec.FLAG_OCCLUDES) != 0
+                || (lavaOccludes && LodSectionCodec.isLava(this.blocks.palette[local]));
+        }
+
+        private void hollow(final long @Nullable [] below, final long @Nullable [] above) {
+            if (!this.present || this.nonEmpty == 0) {
+                return;
+            }
+
+            int airLocal = -1;
+            int buried = 0;
+
+            // only an opaque block can be buried, so the non-opaque bits are skipped outright
+            for (int word = 0; word < MASK_WORDS; ++word) {
+                long bits = this.opaque[word];
+                while (bits != 0L) {
+                    final int shift = Long.numberOfTrailingZeros(bits);
+                    bits &= bits - 1L;
+
+                    final int index = (word << 6) | shift;
+                    if (!isBuried(this.opaque, below, above, index)) {
+                        continue;
                     }
+
+                    if (airLocal < 0) {
+                        airLocal = this.blocks.add(LodSectionCodec.airStateId());
+                    }
+                    if ((this.paletteFlags[this.values[index]] & LodSectionCodec.FLAG_FLUID) != 0) {
+                        --this.fluids;
+                    }
+                    this.values[index] = airLocal;
+                    ++buried;
                 }
             }
+
+            if (buried == 0) {
+                return;
+            }
+
+            this.modified = true;
+            this.nonEmpty -= buried;
         }
-    }
 
-    private static int maskIndex(final int x, final int y, final int z) {
-        return x | (z << 4) | (y << 8);
-    }
+        private void write(final FriendlyByteBuf out, final int defaultBiome) {
+            out.writeShort(this.nonEmpty);
+            out.writeShort(this.fluids);
 
-    private static boolean opaqueAt(final long @Nullable [] mask, final int index) {
-        return mask != null && (mask[index >> 6] & (1L << (index & 63))) != 0L;
-    }
+            if (this.modified || this.blocks.globalPalette) {
+                this.blocks.writeRepacked(out, this.values);
+            } else {
+                this.blocks.writeVerbatim(out);
+            }
 
-    // returns the section with every buried block replaced by air, or null when nothing in it survives
-    private static long[][] opaqueScratch(final int sectionCount) {
-        long[][] scratch = OPAQUE_SCRATCH.get();
-        if (scratch == null || scratch.length < sectionCount) {
-            scratch = new long[sectionCount][MASK_WORDS];
-            OPAQUE_SCRATCH.set(scratch);
+            this.writeBiomes(out, defaultBiome);
         }
-        return scratch;
-    }
 
-    private static @Nullable LevelChunkSection hollowSection(
-        final LevelChunkSection self,
-        final long[] opaque,
-        final long @Nullable [] below,
-        final long @Nullable [] above
-    ) {
-        // safe to edit in place, the parsed section is dropped after this encode and neighbours read the masks
-        final PalettedContainer<BlockState> states = self.getStates();
-        int buried = 0;
+        private void writeEmpty(final FriendlyByteBuf out, final int defaultBiome) {
+            out.writeShort(0);
+            out.writeShort(0);
+            LodSectionCodec.writeSingleValue(out, LodSectionCodec.airStateId());
+            this.writeBiomes(out, defaultBiome);
+        }
 
-        // only an opaque block can be buried, so the non-opaque bits are skipped outright
-        for (int word = 0; word < MASK_WORDS; ++word) {
-            long bits = opaque[word];
-            while (bits != 0L) {
-                final int shift = Long.numberOfTrailingZeros(bits);
-                bits &= bits - 1L;
+        // an emptied section still carries its biomes, they drive the client's grass, foliage and water tint
+        private void writeBiomes(final FriendlyByteBuf out, final int defaultBiome) {
+            if (!this.hasBiomes) {
+                LodSectionCodec.writeSingleValue(out, defaultBiome);
+                return;
+            }
 
-                final int index = (word << 6) | shift;
-                if (!isBuried(opaque, below, above, index)) {
-                    continue;
-                }
-
-                // skips the per block bookkeeping in setBlockState, recalcBlockCounts does it once below
-                states.getAndSetUnchecked(index & 15, (index >> 8) & 15, (index >> 4) & 15, AIR);
-                ++buried;
+            if (this.biomes.globalPalette) {
+                this.biomes.unpack(this.biomeValues);
+                this.biomes.writeRepacked(out, this.biomeValues);
+            } else {
+                this.biomes.writeVerbatim(out);
             }
         }
-
-        if (buried == 0) {
-            return self;
-        }
-        if (buried == SECTION_VOLUME) {
-            return null;
-        }
-
-        self.canvas$removeNonEmptyBlocks(buried);
-        return self.hasOnlyAir() ? null : self;
     }
 
     // unknown neighbours in the next column count as opaque, so a border block is culled rather than leaked
@@ -335,114 +577,8 @@ public final class LodChunkEncoder {
         return opaqueAt(above, index - (15 << 8));
     }
 
-    // one per encode thread, keeps the memo across columns without locking
-    private static final class Occlusion {
-
-        private static final ThreadLocal<Occlusion> CACHED = new ThreadLocal<>();
-
-        private final Reference2BooleanOpenHashMap<BlockState> memo = new Reference2BooleanOpenHashMap<>(256);
-        private final boolean lavaOccludes;
-
-        private Occlusion(final boolean lavaOccludes) {
-            this.lavaOccludes = lavaOccludes;
-        }
-
-        private static Occlusion forLevel(final ServerLevel level) {
-            final boolean lavaOccludes = level.paperConfig().anticheat.antiXray.lavaObscures;
-            final Occlusion cached = CACHED.get();
-            if (cached != null && cached.lavaOccludes == lavaOccludes) {
-                return cached;
-            }
-
-            final Occlusion fresh = new Occlusion(lavaOccludes);
-            CACHED.set(fresh);
-            return fresh;
-        }
-
-        private boolean occludes(final BlockState state) {
-            if (state.isAir()) {
-                return false;
-            }
-            if (this.memo.containsKey(state)) {
-                return this.memo.getBoolean(state);
-            }
-
-            final boolean occludes = this.compute(state);
-            this.memo.put(state, occludes);
-            return occludes;
-        }
-
-        private boolean compute(final BlockState state) {
-            // comparing by identity with the default state matches Anti-Xray, only source lava obscures
-            if (this.lavaOccludes && state == Blocks.LAVA.defaultBlockState()) {
-                return true;
-            }
-            if (!state.isSolidRender()) {
-                return false;
-            }
-
-            // mirrors ChunkPacketBlockControllerAntiXray#solidGlobal, the intersection keeps hollowing at least as strict
-            return state.isRedstoneConductor(EmptyBlockGetter.INSTANCE, BlockPos.ZERO)
-                && !state.is(Blocks.SPAWNER) && !state.is(Blocks.BARRIER) && !state.is(Blocks.SHULKER_BOX)
-                && !state.is(Blocks.SLIME_BLOCK) && !state.is(Blocks.MANGROVE_ROOTS);
-        }
-    }
-
-    // mirrors ClientboundLevelChunkPacketData#HEIGHTMAPS_STREAM_CODEC. LodChunkData already dropped the heightmaps
-    // the client never receives, so every entry here goes out
-    private static void writeHeightmaps(final RegistryFriendlyByteBuf buf, final Map<Heightmap.Types, long[]> heightmaps) {
-        buf.writeVarInt(heightmaps.size());
-        for (final Map.Entry<Heightmap.Types, long[]> entry : heightmaps.entrySet()) {
-            Heightmap.Types.STREAM_CODEC.encode(buf, entry.getKey());
-            ByteBufCodecs.LONG_ARRAY.encode(buf, entry.getValue());
-        }
-    }
-
-    // a column that was never lit renders pitch black, so only accept it if it actually carries light
-    private static boolean isSendable(final LodChunkData data) {
-        final ChunkStatus status = data.status();
-        if ((status != null && status.isOrAfter(ChunkStatus.LIGHT)) || data.lightCorrect()) {
-            return true;
-        }
-
-        for (int i = 0, len = data.skyLight().length; i < len; ++i) {
-            if (hasLight(data.skyLight()[i]) || hasLight(data.blockLight()[i])) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static boolean hasLight(final @Nullable DataLayer layer) {
-        return layer != null && !layer.isEmpty();
-    }
-
-    private static byte[] emptySectionBytes(final PalettedContainerFactory factory) {
-        final byte[] cached = EMPTY_SECTION_BYTES;
-        if (cached != null && EMPTY_SECTION_FACTORY == factory) {
-            return cached;
-        }
-
-        synchronized (LodChunkEncoder.class) {
-            final byte[] recheck = EMPTY_SECTION_BYTES;
-            if (recheck != null && EMPTY_SECTION_FACTORY == factory) {
-                return recheck;
-            }
-
-            final ByteBuf bytes = Unpooled.buffer(32);
-            final byte[] encoded;
-            try {
-                new LevelChunkSection(factory).write(new FriendlyByteBuf(bytes), null, 0);
-                encoded = new byte[bytes.readableBytes()];
-                bytes.readBytes(encoded);
-            } finally {
-                bytes.release();
-            }
-
-            EMPTY_SECTION_FACTORY = factory;
-            EMPTY_SECTION_BYTES = encoded;
-            return encoded;
-        }
+    private static boolean opaqueAt(final long @Nullable [] mask, final int index) {
+        return mask != null && (mask[index >> 6] & (1L << (index & 63))) != 0L;
     }
 
     private static final class LightMasks {
@@ -470,30 +606,40 @@ public final class LodChunkEncoder {
             this.emptyBlockYMask.set(index);
         }
 
-        private void add(final int index, final @Nullable DataLayer sky, final @Nullable DataLayer block) {
+        private void add(final int index, final Section section) {
             if (!this.sendLight) {
                 this.markEmpty(index);
                 return;
             }
 
-            if (hasLight(sky)) {
-                this.skyYMask.set(index);
-                this.skyUpdates.add(sized(sky));
-            } else {
-                this.emptySkyYMask.set(index);
+            switch (lightKind(section.skyLight, section.skyState)) {
+                case LIGHT_DATA -> {
+                    this.skyYMask.set(index);
+                    this.skyUpdates.add(sized(section.skyLight));
+                }
+                case LIGHT_EMPTY -> this.emptySkyYMask.set(index);
+                default -> {
+                }
             }
 
-            if (this.sendBlockLight && hasLight(block)) {
-                this.blockYMask.set(index);
-                this.blockUpdates.add(sized(block));
-            } else {
+            if (!this.sendBlockLight) {
                 this.emptyBlockYMask.set(index);
+                return;
+            }
+
+            switch (lightKind(section.blockLight, section.blockState)) {
+                case LIGHT_DATA -> {
+                    this.blockYMask.set(index);
+                    this.blockUpdates.add(sized(section.blockLight));
+                }
+                case LIGHT_EMPTY -> this.emptyBlockYMask.set(index);
+                default -> {
+                }
             }
         }
 
-        // no clone, the layer is dropped with the parsed data once the buffer is written
-        private static byte[] sized(final DataLayer layer) {
-            final byte[] data = layer.getData();
+        // no clone, the array is dropped with the section tag once the buffer is written
+        private static byte[] sized(final byte[] data) {
             if (data.length == LIGHT_LAYER_BYTES) {
                 return data;
             }
