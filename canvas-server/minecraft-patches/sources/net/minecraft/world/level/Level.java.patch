@@ -107,3 +107,15 @@
  
      public abstract @Nullable Entity getEntity(int id);
  
+@@ -2066,7 +_,10 @@
+     // Folia start - region threading
+     @Override
+     public long getRedstoneGameTime() {
+-        return this.getCurrentWorldData().getRedstoneGameTime();
++        // Canvas start - batched world generation runs off the region threads
++        final io.papermc.paper.threadedregions.RegionizedWorldData worldData = this.getCurrentWorldData();
++        return worldData == null ? this.getLevelData().getGameTime() : worldData.getRedstoneGameTime();
++        // Canvas end - batched world generation runs off the region threads
+     }
+ 
+     @Override

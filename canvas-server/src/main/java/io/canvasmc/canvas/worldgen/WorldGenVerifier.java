@@ -26,6 +26,47 @@ public final class WorldGenVerifier {
         }
     }
 
+    /**
+     * Same chunks out of two batches that differ only in the order the square is walked.
+     */
+    public static Result order(final ServerLevel level, final int minChunkX, final int minChunkZ, final int size, final ChunkStatus target) {
+        final long forwardStart = System.nanoTime();
+        final ChunkAccess[] forward = BatchWorldGen.generate(level, minChunkX, minChunkZ, size, target, false);
+        final long forwardNanos = System.nanoTime() - forwardStart;
+        final long reverseStart = System.nanoTime();
+        final ChunkAccess[] reverse = BatchWorldGen.generate(level, minChunkX, minChunkZ, size, target, true);
+        final long reverseNanos = System.nanoTime() - reverseStart;
+        if (forward == null || reverse == null) {
+            return new Result(0, 0, 1, forwardNanos, reverseNanos, "generation returned nothing");
+        }
+
+        final int minY = level.getMinY();
+        final int maxY = level.getMaxY();
+        int blocks = 0;
+        int mismatches = 0;
+        String firstMismatch = "";
+
+        for (int index = 0; index < forward.length; ++index) {
+            for (int y = minY; y <= maxY; ++y) {
+                for (int z = 0; z < 16; ++z) {
+                    for (int x = 0; x < 16; ++x) {
+                        final BlockPos pos = new BlockPos(x, y, z);
+                        ++blocks;
+                        if (!forward[index].getBlockState(pos).equals(reverse[index].getBlockState(pos))) {
+                            ++mismatches;
+                            if (firstMismatch.isEmpty()) {
+                                firstMismatch = forward[index].getPos() + " at " + x + "," + y + "," + z
+                                    + " forward=" + forward[index].getBlockState(pos) + " reverse=" + reverse[index].getBlockState(pos);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        return new Result(forward.length, blocks, mismatches, forwardNanos, reverseNanos, firstMismatch);
+    }
+
     public static Result verify(final ServerLevel level, final int minChunkX, final int minChunkZ, final int size, final ChunkStatus target) {
         final long batchStart = System.nanoTime();
         final ChunkAccess[] batched = BatchWorldGen.generate(level, minChunkX, minChunkZ, size, target);
