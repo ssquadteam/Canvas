@@ -25,6 +25,38 @@ public final class VanillaComparison {
     private VanillaComparison() {
     }
 
+    /**
+     * Times the chunk system generating the same square, for a number the batch can be compared against.
+     */
+    public static void bench(
+        final ServerLevel level,
+        final int minChunkX,
+        final int minChunkZ,
+        final int size,
+        final ChunkStatus target,
+        final Consumer<String> report
+    ) {
+        final ChunkTaskScheduler scheduler = ((ChunkSystemServerLevel) level).moonrise$getChunkTaskScheduler();
+        final int total = size * size;
+        final AtomicInteger remaining = new AtomicInteger(total);
+        final long start = System.nanoTime();
+
+        for (int index = 0; index < total; ++index) {
+            final int chunkX = minChunkX + (index % size);
+            final int chunkZ = minChunkZ + (index / size);
+            scheduler.scheduleChunkLoad(chunkX, chunkZ, target, true, Priority.HIGHER, (final @Nullable ChunkAccess chunk) -> {
+                if (remaining.decrementAndGet() == 0) {
+                    final double seconds = (System.nanoTime() - start) / 1.0E9;
+                    report.accept(String.format(
+                        java.util.Locale.ROOT,
+                        "chunk system %d chunks in %.2fs, %.1f chunks/s",
+                        total, seconds, total / seconds
+                    ));
+                }
+            });
+        }
+    }
+
     public static void run(
         final ServerLevel level,
         final int minChunkX,

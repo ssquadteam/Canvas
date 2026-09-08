@@ -192,7 +192,14 @@ public final class BatchWorldGen {
             final SerializableChunkData chunkData = SerializableChunkData.parse(
                 level, level.palettedContainerFactory(), level.getChunkSource().chunkMap.upgradeChunkTag(data)
             );
-            return chunkData == null ? null : chunkData.read(level, level.getPoiManager(), level.getChunkSource().chunkMap.storageInfo(), pos);
+            if (chunkData == null) {
+                return null;
+            }
+
+            final ProtoChunk chunk = chunkData.read(level, level.getPoiManager(), level.getChunkSource().chunkMap.storageInfo(), pos);
+            // it came off disk unchanged, so nothing needs writing back unless something touches it
+            chunk.tryMarkSaved();
+            return chunk;
         } catch (final Throwable thr) {
             LOGGER.error("Failed to read chunk {} for batch generation", pos, thr);
             return null;
