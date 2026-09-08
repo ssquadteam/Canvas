@@ -1,0 +1,20 @@
+--- a/net/minecraft/util/CubicSpline.java
++++ b/net/minecraft/util/CubicSpline.java
+@@ -222,6 +_,17 @@
+             this(coordinate, locations, values, derivatives, minValue, maxValue);
+         }
+ 
++        // Canvas start - hash splines in constant time
++        // equal multipoints hold the same arrays, the record compares them by reference, so identity hashing agrees
++        @Override
++        public int hashCode() {
++            int hash = System.identityHashCode(this.locations);
++            hash = (hash * 31) + System.identityHashCode(this.derivatives);
++            hash = (hash * 31) + Float.hashCode(this.minValue);
++            return (hash * 31) + Float.hashCode(this.maxValue);
++        }
++        // Canvas end - hash splines in constant time
++
+         private static float linearExtend(final float input, final float[] locations, final float value, final float[] derivatives, final int index) {
+             float derivative = derivatives[index];
+             return derivative == 0.0F ? value : value + derivative * (input - locations[index]);

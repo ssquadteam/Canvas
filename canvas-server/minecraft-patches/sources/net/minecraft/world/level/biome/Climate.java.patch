@@ -1,0 +1,42 @@
+--- a/net/minecraft/world/level/biome/Climate.java
++++ b/net/minecraft/world/level/biome/Climate.java
+@@ -418,9 +_,17 @@
+         @VisibleForTesting
+         abstract static class Node<T> {
+             protected final Climate.Parameter[] parameterSpace;
++            private final long[] bounds; // Canvas - flatten the parameter space, searching chases one per dimension
+ 
+             protected Node(final List<Climate.Parameter> parameterSpace) {
+                 this.parameterSpace = parameterSpace.toArray(new Climate.Parameter[0]);
++                // Canvas start - flatten the parameter space
++                this.bounds = new long[this.parameterSpace.length << 1];
++                for (int i = 0; i < this.parameterSpace.length; ++i) {
++                    this.bounds[i << 1] = this.parameterSpace[i].min();
++                    this.bounds[(i << 1) | 1] = this.parameterSpace[i].max();
++                }
++                // Canvas end - flatten the parameter space
+             }
+ 
+             protected abstract Climate.RTree.Leaf<T> search(
+@@ -428,13 +_,20 @@
+             );
+ 
+             protected long distance(final long[] target) {
++                // Canvas start - flatten the parameter space - same arithmetic, without a Parameter load per dimension
++                final long[] bounds = this.bounds;
+                 long distance = 0L;
+ 
+                 for (int i = 0; i < 7; i++) {
+-                    distance += Mth.square(this.parameterSpace[i].distance(target[i]));
++                    final long value = target[i];
++                    final long above = value - bounds[(i << 1) | 1];
++                    final long below = bounds[i << 1] - value;
++                    final long axis = above > 0L ? above : Math.max(below, 0L);
++                    distance += axis * axis;
+                 }
+ 
+                 return distance;
++                // Canvas end - flatten the parameter space
+             }
+ 
+             @Override
