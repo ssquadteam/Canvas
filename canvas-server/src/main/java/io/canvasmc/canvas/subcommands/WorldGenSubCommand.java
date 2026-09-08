@@ -8,6 +8,7 @@ import com.mojang.brigadier.context.CommandContext;
 import io.canvasmc.canvas.commands.SubCommand;
 import io.canvasmc.canvas.worldgen.BatchWorldGen;
 import io.canvasmc.canvas.worldgen.VanillaComparison;
+import io.canvasmc.canvas.worldgen.LiveWorldGen;
 import io.canvasmc.canvas.worldgen.WorldGenPipeline;
 import io.canvasmc.canvas.worldgen.WorldGenSweep;
 import io.canvasmc.canvas.worldgen.WorldGenVerifier;
@@ -81,6 +82,37 @@ public class WorldGenSubCommand implements SubCommand {
                                 IntegerArgumentType.getInteger(context, "height"),
                                 IntegerArgumentType.getInteger(context, "offset")
                             ))))))
+            .then(literal("vanillabench")
+                .then(argument("size", IntegerArgumentType.integer(1, 256))
+                    .then(argument("offset", IntegerArgumentType.integer(64, 200000))
+                        .executes(context -> vanillaBench(
+                            context,
+                            IntegerArgumentType.getInteger(context, "size"),
+                            IntegerArgumentType.getInteger(context, "offset")
+                        )))))
+            .then(literal("anchor")
+                .then(argument("chunkX", IntegerArgumentType.integer(-1000000, 1000000))
+                    .then(argument("chunkZ", IntegerArgumentType.integer(-1000000, 1000000))
+                        .executes(context -> {
+                            LiveWorldGen.anchor(
+                                context.getSource().getLevel(),
+                                IntegerArgumentType.getInteger(context, "chunkX"),
+                                IntegerArgumentType.getInteger(context, "chunkZ")
+                            );
+                            context.getSource().sendSystemMessage(Component.literal("anchor added"));
+                            return Command.SINGLE_SUCCESS;
+                        })))
+                .then(literal("clear")
+                    .executes(context -> {
+                        LiveWorldGen.clearAnchors();
+                        context.getSource().sendSystemMessage(Component.literal("anchors cleared"));
+                        return Command.SINGLE_SUCCESS;
+                    })))
+            .then(literal("status")
+                .executes(context -> {
+                    context.getSource().sendSystemMessage(Component.literal(LiveWorldGen.status()));
+                    return Command.SINGLE_SUCCESS;
+                }))
             .then(literal("bench")
                 .then(argument("size", IntegerArgumentType.integer(1, 32))
                     .executes(context -> bench(context, IntegerArgumentType.getInteger(context, "size")))));
@@ -183,6 +215,18 @@ public class WorldGenSubCommand implements SubCommand {
         }, "canvas-worldgen-pipeline");
         worker.setDaemon(true);
         worker.start();
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int vanillaBench(final CommandContext<CommandSourceStack> context, final int size, final int offset) {
+        final CommandSourceStack source = context.getSource();
+        final ServerLevel level = source.getLevel();
+        final int minChunkX = (Mth.floor(source.getPosition().x()) >> 4) + offset;
+        final int minChunkZ = (Mth.floor(source.getPosition().z()) >> 4) + offset;
+
+        source.sendSystemMessage(Component.literal("Asking the chunk system for " + (size * size) + " chunks..."));
+        VanillaComparison.bench(level, minChunkX, minChunkZ, size, ChunkStatus.FEATURES,
+            line -> source.getServer().sendSystemMessage(Component.literal("[worldgen] " + line)));
         return Command.SINGLE_SUCCESS;
     }
 

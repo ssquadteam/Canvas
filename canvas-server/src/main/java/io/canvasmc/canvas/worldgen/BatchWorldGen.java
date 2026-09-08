@@ -236,6 +236,11 @@ public final class BatchWorldGen {
             return false;
         }
 
+        // the chunk system saves what it holds, so writing underneath it would throw away whatever it has done since
+        if (LiveWorldGen.held(level, chunk.getPos().x(), chunk.getPos().z(), 1)) {
+            return false;
+        }
+
         try {
             final SerializableChunkData chunkData = SerializableChunkData.copyOf(level, chunk);
             chunk.tryMarkSaved();

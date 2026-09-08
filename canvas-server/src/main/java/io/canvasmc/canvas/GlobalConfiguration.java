@@ -446,6 +446,50 @@ public class GlobalConfiguration extends Part {
         public boolean optimizeTreasureMapLocating = false;
     }
 
+    public static class WorldGeneration extends Part {
+
+        {
+            option("frontierEnabled")
+                .docs(
+                    Style.wrap(
+                        "Generates terrain ahead of players out to the extended view distance, driving the vanilla",
+                        "generation steps directly instead of asking the chunk system for the chunks. Only chunks the",
+                        "chunk system does not hold are touched, so this never competes with it for ownership."
+                    )
+                );
+        }
+
+        public boolean frontierEnabled = false;
+
+        {
+            option("frontierDistance")
+                .docs("How far out from a player, in chunks, terrain is kept generated.");
+        }
+
+        public int frontierDistance = 32;
+
+        {
+            option("frontierTileSize")
+                .docs(
+                    Style.wrap(
+                        "Chunks per side of one unit of work. Larger tiles share more of their generation padding and",
+                        "so cost less per chunk, but hold more chunks in memory at once and react to movement slower."
+                    )
+                );
+        }
+
+        public int frontierTileSize = 16;
+
+        {
+            option("frontierThreads")
+                .docs("Threads generating terrain. 0 picks a quarter of the available cores.");
+        }
+
+        public int frontierThreads = 0;
+    }
+
+    public WorldGeneration worldGeneration = new WorldGeneration();
+
     // TODO - check these on minecraft updates
     public UpstreamFixes vanillaFixes = new UpstreamFixes();
     public static class UpstreamFixes extends Part {

@@ -67,7 +67,7 @@ public final class VanillaComparison {
     ) {
         final Thread worker = new Thread(() -> {
             final long start = System.nanoTime();
-            final ChunkAccess[] batch = BatchWorldGen.generate(level, minChunkX, minChunkZ, size, target);
+            final ChunkAccess[] batch = WorldGenPipeline.collect(level, minChunkX, minChunkZ, size, size, target);
             final long batchNanos = System.nanoTime() - start;
 
             if (batch == null) {
