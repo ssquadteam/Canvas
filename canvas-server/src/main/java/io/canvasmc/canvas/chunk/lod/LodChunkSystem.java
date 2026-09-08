@@ -1,20 +1,24 @@
 package io.canvasmc.canvas.chunk.lod;
 
+import ca.spottedleaf.moonrise.common.util.CoordinateUtils;
 import ca.spottedleaf.moonrise.common.util.MoonriseConstants;
 import ca.spottedleaf.moonrise.patches.chunk_system.player.ChunkSystemServerPlayer;
 import ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader;
 import io.canvasmc.canvas.WorldConfig;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
+import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.OptionalInt;
 import java.util.UUID;
-import java.util.Comparator;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.Level;
+import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.craftbukkit.CraftWorld;
 import org.bukkit.craftbukkit.entity.CraftPlayer;
@@ -66,7 +70,7 @@ public final class LodChunkSystem implements LodChunkService {
     private static <K> Object2IntMap<K> synchronizedIntMap() {
         final Object2IntOpenHashMap<K> map = new Object2IntOpenHashMap<>();
         map.defaultReturnValue(UNSET);
-        return it.unimi.dsi.fastutil.objects.Object2IntMaps.synchronize(map);
+        return Object2IntMaps.synchronize(map);
     }
 
     // hot path, called by the chunk loader on the player's own region thread
@@ -317,8 +321,8 @@ public final class LodChunkSystem implements LodChunkService {
 
     @Override
     public synchronized void registerResolver(final Plugin plugin, final LodResolver resolver) {
-        java.util.Objects.requireNonNull(plugin, "plugin");
-        java.util.Objects.requireNonNull(resolver, "resolver");
+        Objects.requireNonNull(plugin, "plugin");
+        Objects.requireNonNull(resolver, "resolver");
 
         final List<RegisteredResolver> updated = new ArrayList<>(this.resolvers);
         updated.add(new RegisteredResolver(plugin, resolver));
@@ -376,7 +380,7 @@ public final class LodChunkSystem implements LodChunkService {
     @Override
     public void refreshAll() {
         this.updateOverrideFlag();
-        for (final World world : org.bukkit.Bukkit.getWorlds()) {
+        for (final World world : Bukkit.getWorlds()) {
             this.refresh(world);
         }
     }
@@ -400,13 +404,13 @@ public final class LodChunkSystem implements LodChunkService {
 
     @Override
     public void invalidateCache(final World world, final int chunkX, final int chunkZ) {
-        level(world).canvasLodCache().invalidate(ca.spottedleaf.moonrise.common.util.CoordinateUtils.getChunkKey(chunkX, chunkZ));
+        level(world).canvasLodCache().invalidate(CoordinateUtils.getChunkKey(chunkX, chunkZ));
     }
 
     @Override
     public int cachedColumns() {
         int total = 0;
-        for (final World world : org.bukkit.Bukkit.getWorlds()) {
+        for (final World world : Bukkit.getWorlds()) {
             total += level(world).canvasLodCache().size();
         }
         return total;
