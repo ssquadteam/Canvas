@@ -95,6 +95,132 @@
          @Override
          public double compute(final DensityFunction.FunctionContext context) {
              double v1 = this.argument1.compute(context);
+@@ -755,8 +_,70 @@
+         }
+     }
+ 
+-    protected record Mapped(DensityFunctions.Mapped.Type type, @Override DensityFunction input, @Override double minValue, @Override double maxValue)
+-        implements DensityFunctions.PureTransformer {
++    // Canvas start - cache the hash
++    protected static final class Mapped implements DensityFunctions.PureTransformer {
++        private final DensityFunctions.Mapped.Type type;
++        private final DensityFunction input;
++        private final double minValue;
++        private final double maxValue;
++        private final int hash;
++
++        Mapped(final DensityFunctions.Mapped.Type type, final DensityFunction input, final double minValue, final double maxValue) {
++            this.type = type;
++            this.input = input;
++            this.minValue = minValue;
++            this.maxValue = maxValue;
++
++            int hash = type.hashCode();
++            hash = (hash * 31) + input.hashCode();
++            hash = (hash * 31) + Double.hashCode(minValue);
++            this.hash = (hash * 31) + Double.hashCode(maxValue);
++        }
++
++        public DensityFunctions.Mapped.Type type() {
++            return this.type;
++        }
++
++        @Override
++        public DensityFunction input() {
++            return this.input;
++        }
++
++        @Override
++        public double minValue() {
++            return this.minValue;
++        }
++
++        @Override
++        public double maxValue() {
++            return this.maxValue;
++        }
++
++        @Override
++        public boolean equals(final Object other) {
++            if (this == other) {
++                return true;
++            }
++            if (!(other instanceof final DensityFunctions.Mapped that) || this.hash != that.hash) {
++                return false;
++            }
++            return this.type == that.type
++                && Double.compare(this.minValue, that.minValue) == 0
++                && Double.compare(this.maxValue, that.maxValue) == 0
++                && this.input.equals(that.input);
++        }
++
++        @Override
++        public int hashCode() {
++            return this.hash;
++        }
++
++        @Override
++        public String toString() {
++            return "Mapped[type=" + this.type + ", input=" + this.input + ", minValue=" + this.minValue
++                + ", maxValue=" + this.maxValue + "]";
++        }
++    // Canvas end - cache the hash
+         public static DensityFunctions.Mapped create(final DensityFunctions.Mapped.Type type, final DensityFunction input) {
+             double minValue = input.minValue();
+             double maxValue = input.maxValue();
+@@ -828,7 +_,51 @@
+         }
+     }
+ 
+-    record Marker(@Override DensityFunctions.Marker.Type type, @Override DensityFunction wrapped) implements DensityFunctions.MarkerOrMarked {
++    // Canvas start - cache the hash
++    static final class Marker implements DensityFunctions.MarkerOrMarked {
++        private final DensityFunctions.Marker.Type type;
++        private final DensityFunction wrapped;
++        private final int hash;
++
++        Marker(final DensityFunctions.Marker.Type type, final DensityFunction wrapped) {
++            this.type = type;
++            this.wrapped = wrapped;
++
++            final int hash = type.hashCode();
++            this.hash = (hash * 31) + wrapped.hashCode();
++        }
++
++        @Override
++        public DensityFunctions.Marker.Type type() {
++            return this.type;
++        }
++
++        @Override
++        public DensityFunction wrapped() {
++            return this.wrapped;
++        }
++
++        @Override
++        public boolean equals(final Object other) {
++            if (this == other) {
++                return true;
++            }
++            if (!(other instanceof final DensityFunctions.Marker that) || this.hash != that.hash) {
++                return false;
++            }
++            return this.type == that.type && this.wrapped.equals(that.wrapped);
++        }
++
++        @Override
++        public int hashCode() {
++            return this.hash;
++        }
++
++        @Override
++        public String toString() {
++            return "Marker[type=" + this.type + ", wrapped=" + this.wrapped + "]";
++        }
++    // Canvas end - cache the hash
+         @Override
+         public double compute(final DensityFunction.FunctionContext context) {
+             return this.wrapped.compute(context);
 @@ -889,9 +_,76 @@
          }
      }

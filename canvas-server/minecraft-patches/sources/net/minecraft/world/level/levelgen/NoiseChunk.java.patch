@@ -1,6 +1,6 @@
 --- a/net/minecraft/world/level/levelgen/NoiseChunk.java
 +++ b/net/minecraft/world/level/levelgen/NoiseChunk.java
-@@ -373,7 +_,17 @@
+@@ -373,13 +_,24 @@
      }
  
      protected DensityFunction wrap(final DensityFunction function) {
@@ -19,3 +19,12 @@
      }
  
      private DensityFunction wrapNew(final DensityFunction function) {
+         return switch (function) {
+-            case DensityFunctions.Marker(DensityFunctions.Marker.Type type, DensityFunction wrapped) -> {
+-                switch (type) {
++            case DensityFunctions.Marker marker -> {
++                final DensityFunction wrapped = marker.wrapped();
++                switch (marker.type()) {
+                     case Interpolated:
+                         yield new NoiseChunk.NoiseInterpolator(wrapped);
+                     case FlatCache:
