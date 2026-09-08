@@ -473,16 +473,22 @@ public class GlobalConfiguration extends Part {
                 .docs(
                     Style.wrap(
                         "Chunks per side of one unit of work. Larger tiles share more of their generation padding and",
-                        "so cost less per chunk, but hold more chunks in memory at once and react to movement slower."
+                        "so cost less per chunk, but hold more chunks in memory at once and react to movement slower.",
+                        "Tiles much wider than the distance above overshoot it and generate terrain nobody asked for."
                     )
                 );
         }
 
-        public int frontierTileSize = 16;
+        public int frontierTileSize = 32;
 
         {
             option("frontierThreads")
-                .docs("Threads generating terrain. 0 picks a quarter of the available cores.");
+                .docs(
+                    Style.wrap(
+                        "Threads generating terrain. 0 picks twice the available cores, which is deliberate: each row",
+                        "of a tile ends in a barrier, so threads spend part of their time waiting rather than running."
+                    )
+                );
         }
 
         public int frontierThreads = 0;

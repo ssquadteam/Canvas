@@ -1,6 +1,9 @@
 package io.canvasmc.canvas.worldgen;
 
-import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -90,7 +93,25 @@ public final class WorldGenPipeline {
         final int height,
         final ChunkStatus target
     ) {
-        return generate(level, minChunkX, minChunkZ, width, height, target, null);
+        return generate(level, minChunkX, minChunkZ, width, height, target, null, 1, null);
+    }
+
+    /**
+     * Spreads each row across a pool. Steps that write only their own chunk have nothing to contend over, so a whole
+     * row runs at once; the one step that writes into its neighbours is run in three passes of every third column, far
+     * enough apart that no two running chunks can reach the same block.
+     */
+    public static Result generate(
+        final ServerLevel level,
+        final int minChunkX,
+        final int minChunkZ,
+        final int width,
+        final int height,
+        final ChunkStatus target,
+        final int threads,
+        final ExecutorService pool
+    ) {
+        return generate(level, minChunkX, minChunkZ, width, height, target, null, threads, pool);
     }
 
     /**
@@ -102,10 +123,18 @@ public final class WorldGenPipeline {
         final int minChunkZ,
         final int width,
         final int height,
-        final ChunkStatus target
+        final ChunkStatus target,
+        final int threads
     ) {
         final ChunkAccess[] collected = new ChunkAccess[width * height];
-        generate(level, minChunkX, minChunkZ, width, height, target, collected);
+        final ExecutorService pool = threads > 1 ? java.util.concurrent.Executors.newFixedThreadPool(threads) : null;
+        try {
+            generate(level, minChunkX, minChunkZ, width, height, target, collected, threads, pool);
+        } finally {
+            if (pool != null) {
+                pool.shutdownNow();
+            }
+        }
         return collected;
     }
 
@@ -116,7 +145,9 @@ public final class WorldGenPipeline {
         final int width,
         final int height,
         final ChunkStatus target,
-        final ChunkAccess @org.jspecify.annotations.Nullable [] collect
+        final ChunkAccess @org.jspecify.annotations.Nullable [] collect,
+        final int threads,
+        final @org.jspecify.annotations.Nullable ExecutorService pool
     ) {
         final long start = System.nanoTime();
         final ChunkStep targetStep = ChunkPyramid.GENERATION_PYRAMID.getStepTo(target);
@@ -141,10 +172,14 @@ public final class WorldGenPipeline {
         }
 
         final WorldGenContext context = level.getChunkSource().chunkMap.worldGenContext;
-        final Long2ObjectOpenHashMap<Slot> live = new Long2ObjectOpenHashMap<>();
+        final Map<Long, Slot> live = new ConcurrentHashMap<>();
         final int side = reach(target);
         final int fromX = x0 - side;
         final int toX = x1 + side;
+        // dropping rows as the front passes keeps a big rectangle's memory flat, but it means a chunk can be written
+        // and then asked for again, and the write is asynchronous. A rectangle small enough to hold whole never has to
+        // take that risk
+        final boolean evict = (long) (width + (side * 2)) * (height + (side * 2)) > 16384L;
         int saved = 0;
 
         for (int front = z0 - (maxLead * 2); front <= z1; ++front) {
@@ -158,19 +193,28 @@ public final class WorldGenPipeline {
 
                 final ChunkStep step = ChunkPyramid.GENERATION_PYRAMID.getStepTo(status);
                 final int reach = Math.max(0, step.directDependencies().size() - 1);
-                for (int x = x0 - lead; x <= x1 + lead; ++x) {
-                    final Slot slot = slot(live, level, x, row);
-                    if (slot.chunk.getPersistedStatus().isOrAfter(status)) {
-                        continue;
+                final int rowFrom = x0 - lead;
+                final int rowTo = x1 + lead;
+                // a step that writes into its neighbours needs a gap wide enough that two running chunks cannot touch
+                // the same block, which is one chunk of write on each side plus the chunk between them. Steps that
+                // never declare a write radius report -1 rather than 0, so the gap is clamped
+                final int stride = Math.max(1, (step.blockStateWriteRadius() * 2) + 1);
+
+                if (pool == null || threads <= 1) {
+                    for (int x = rowFrom; x <= rowTo; ++x) {
+                        apply(live, level, context, step, status, x, row, reach);
                     }
-                    slot.chunk = step.apply(context, neighbours(live, level, x, row, reach), slot.chunk).join();
+                } else {
+                    for (int offset = 0; offset < stride; ++offset) {
+                        runPass(pool, live, level, context, step, status, row, reach, rowFrom + offset, rowTo, stride);
+                    }
                 }
             }
 
             // a row is finished once nothing still running can read or write it, which is the status that reaches
             // furthest behind its own row, not the target status
             final int finished = front - 1 - trail;
-            if (finished >= z0 - maxLead) {
+            if (evict && finished >= z0 - maxLead) {
                 saved += flush(live, level, finished, fromX, toX, collect, minChunkX, minChunkZ, width, height);
             }
         }
@@ -191,27 +235,71 @@ public final class WorldGenPipeline {
         return new Result(width * height, saved, System.nanoTime() - start);
     }
 
+    private static void apply(
+        final Map<Long, Slot> live,
+        final ServerLevel level,
+        final WorldGenContext context,
+        final ChunkStep step,
+        final ChunkStatus status,
+        final int x,
+        final int z,
+        final int reach
+    ) {
+        final Slot slot = slot(live, level, x, z);
+        if (slot.chunk.getPersistedStatus().isOrAfter(status)) {
+            return;
+        }
+        slot.chunk = step.apply(context, neighbours(live, level, x, z, reach), slot.chunk).join();
+    }
+
+    private static void runPass(
+        final ExecutorService pool,
+        final Map<Long, Slot> live,
+        final ServerLevel level,
+        final WorldGenContext context,
+        final ChunkStep step,
+        final ChunkStatus status,
+        final int row,
+        final int reach,
+        final int from,
+        final int to,
+        final int stride
+    ) {
+        final List<Future<?>> pending = new ArrayList<>();
+        for (int x = from; x <= to; x += stride) {
+            final int column = x;
+            pending.add(pool.submit(() -> apply(live, level, context, step, status, column, row, reach)));
+        }
+
+        for (final Future<?> future : pending) {
+            try {
+                future.get();
+            } catch (final InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("interrupted while generating", interrupted);
+            } catch (final java.util.concurrent.ExecutionException failure) {
+                throw new IllegalStateException("failed to generate " + status.getName() + " row " + row, failure.getCause());
+            }
+        }
+    }
+
     private static StaticCache2D<GenerationChunkHolder> neighbours(
-        final Long2ObjectOpenHashMap<Slot> live, final ServerLevel level, final int x, final int z, final int reach
+        final Map<Long, Slot> live, final ServerLevel level, final int x, final int z, final int reach
     ) {
         return StaticCache2D.create(x, z, reach, (final int nx, final int nz) -> slot(live, level, nx, nz));
     }
 
-    private static Slot slot(final Long2ObjectOpenHashMap<Slot> live, final ServerLevel level, final int x, final int z) {
-        final long key = ChunkPos.pack(x, z);
-        Slot slot = live.get(key);
-        if (slot == null) {
+    private static Slot slot(final Map<Long, Slot> live, final ServerLevel level, final int x, final int z) {
+        return live.computeIfAbsent(ChunkPos.pack(x, z), ignored -> {
             final ChunkPos pos = new ChunkPos(x, z);
             final ChunkAccess existing = BatchWorldGen.read(level, pos);
-            slot = new Slot(pos, existing != null ? existing
+            return new Slot(pos, existing != null ? existing
                 : new ProtoChunk(pos, UpgradeData.EMPTY, level, level.palettedContainerFactory(), null));
-            live.put(key, slot);
-        }
-        return slot;
+        });
     }
 
     private static int flush(
-        final Long2ObjectOpenHashMap<Slot> live,
+        final Map<Long, Slot> live,
         final ServerLevel level,
         final int row,
         final int fromX,
@@ -255,7 +343,7 @@ public final class WorldGenPipeline {
 
     private static final class Slot extends GenerationChunkHolder {
 
-        private ChunkAccess chunk;
+        private volatile ChunkAccess chunk;
 
         private Slot(final ChunkPos pos, final ChunkAccess chunk) {
             super(pos);

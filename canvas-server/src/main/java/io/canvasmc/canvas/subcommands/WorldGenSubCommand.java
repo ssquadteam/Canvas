@@ -80,8 +80,17 @@ public class WorldGenSubCommand implements SubCommand {
                                 context,
                                 IntegerArgumentType.getInteger(context, "width"),
                                 IntegerArgumentType.getInteger(context, "height"),
-                                IntegerArgumentType.getInteger(context, "offset")
-                            ))))))
+                                IntegerArgumentType.getInteger(context, "offset"),
+                                1
+                            ))
+                            .then(argument("threads", IntegerArgumentType.integer(1, 32))
+                                .executes(context -> pipeline(
+                                    context,
+                                    IntegerArgumentType.getInteger(context, "width"),
+                                    IntegerArgumentType.getInteger(context, "height"),
+                                    IntegerArgumentType.getInteger(context, "offset"),
+                                    IntegerArgumentType.getInteger(context, "threads")
+                                )))))))
             .then(literal("vanillabench")
                 .then(argument("size", IntegerArgumentType.integer(1, 256))
                     .then(argument("offset", IntegerArgumentType.integer(64, 200000))
@@ -194,7 +203,7 @@ public class WorldGenSubCommand implements SubCommand {
         return Command.SINGLE_SUCCESS;
     }
 
-    private static int pipeline(final CommandContext<CommandSourceStack> context, final int width, final int height, final int offset) {
+    private static int pipeline(final CommandContext<CommandSourceStack> context, final int width, final int height, final int offset, final int threads) {
         final CommandSourceStack source = context.getSource();
         final ServerLevel level = source.getLevel();
         final int minChunkX = (Mth.floor(source.getPosition().x()) >> 4) + offset;
@@ -203,7 +212,17 @@ public class WorldGenSubCommand implements SubCommand {
         source.sendSystemMessage(Component.literal("Piping " + (width * height) + " chunks, this runs in the background..."));
         final Thread worker = new Thread(() -> {
             try {
-                final WorldGenPipeline.Result result = WorldGenPipeline.generate(level, minChunkX, minChunkZ, width, height, ChunkStatus.FEATURES);
+                final java.util.concurrent.ExecutorService pool = threads > 1
+                    ? java.util.concurrent.Executors.newFixedThreadPool(threads)
+                    : null;
+                final WorldGenPipeline.Result result;
+                try {
+                    result = WorldGenPipeline.generate(level, minChunkX, minChunkZ, width, height, ChunkStatus.FEATURES, threads, pool);
+                } finally {
+                    if (pool != null) {
+                        pool.shutdownNow();
+                    }
+                }
                 final double seconds = result.nanos() / 1.0E9;
                 source.getServer().sendSystemMessage(Component.literal(String.format(
                     Locale.ROOT, "[worldgen] pipeline %d chunks in %.2fs, %.1f chunks/s, %d written",

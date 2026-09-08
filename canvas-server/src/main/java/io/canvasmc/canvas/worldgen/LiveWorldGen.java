@@ -45,6 +45,8 @@ public final class LiveWorldGen {
     private final int tile;
     private final int maxInFlight;
     private final ExecutorService workers;
+    private final ExecutorService rowPool;
+    private final int threads;
     private final Map<ServerLevel, LongSet> done = new ConcurrentHashMap<>();
     private final java.util.Set<Claim> claimed = ConcurrentHashMap.newKeySet();
     private final int spacing;
@@ -72,6 +74,10 @@ public final class LiveWorldGen {
             }
         };
         this.workers = Executors.newFixedThreadPool(threads, factory);
+        this.threads = threads;
+        // a single player's ring is only a few tiles across, so tiles alone cannot fill the pool; the row pool spreads
+        // one tile's own rows instead
+        this.rowPool = Executors.newFixedThreadPool(threads, factory);
     }
 
     public static void tick(final MinecraftServer server) {
@@ -81,6 +87,7 @@ public final class LiveWorldGen {
         if (!config.frontierEnabled) {
             if (live != null) {
                 live.workers.shutdownNow();
+                live.rowPool.shutdownNow();
                 instance = null;
             }
             return;
@@ -89,7 +96,7 @@ public final class LiveWorldGen {
         if (live == null) {
             final int threads = config.frontierThreads > 0
                 ? config.frontierThreads
-                : Math.max(1, Runtime.getRuntime().availableProcessors() / 4);
+                : Math.max(2, Runtime.getRuntime().availableProcessors() * 2);
             live = new LiveWorldGen(config.frontierDistance, config.frontierTileSize, threads);
             instance = live;
             LOGGER.info("Frontier world generation running out to {} chunks on {} threads", live.distance, threads);
@@ -153,8 +160,12 @@ public final class LiveWorldGen {
                         continue;
                     }
 
-                    final int dx = ((tileX * this.tile) + (this.tile / 2)) - position.x();
-                    final int dz = ((tileZ * this.tile) + (this.tile / 2)) - position.z();
+                    // measure to the nearest corner of the tile, not its middle, or a tile wider than the ring is
+                    // dropped even when most of it lies inside
+                    final int minX = tileX * this.tile;
+                    final int minZ = tileZ * this.tile;
+                    final int dx = position.x() - Math.max(minX, Math.min(position.x(), minX + this.tile - 1));
+                    final int dz = position.z() - Math.max(minZ, Math.min(position.z(), minZ + this.tile - 1));
                     final int distanceSq = (dx * dx) + (dz * dz);
                     if (distanceSq > this.distance * this.distance) {
                         continue;
@@ -190,14 +201,25 @@ public final class LiveWorldGen {
             }
 
             final WorldGenPipeline.Result result = WorldGenPipeline.generate(
-                candidate.level, minX, minZ, this.tile, this.tile, ChunkStatus.FEATURES
+                candidate.level, minX, minZ, this.tile, this.tile, ChunkStatus.FEATURES, this.threads, this.rowPool
             );
             this.done.computeIfAbsent(candidate.level, ignored -> LongSets.synchronize(new LongOpenHashSet()))
                 .add(candidate.key);
             this.chunks.addAndGet(result.chunks());
             this.tiles.incrementAndGet();
         } catch (final Throwable thr) {
-            LOGGER.error("Frontier generation failed for tile {}, {}", candidate.tileX, candidate.tileZ, thr);
+            this.done.computeIfAbsent(candidate.level, ignored -> LongSets.synchronize(new LongOpenHashSet()))
+                .add(candidate.key);
+            Throwable cause = thr;
+            while (cause != null && !(cause instanceof net.minecraft.ReportedException)) {
+                cause = cause.getCause();
+            }
+            if (cause != null) {
+                LOGGER.error("Frontier generation failed for tile {}, {}\n{}", candidate.tileX, candidate.tileZ,
+                    ((net.minecraft.ReportedException) cause).getReport().getFriendlyReport(net.minecraft.ReportType.CRASH));
+            } else {
+                LOGGER.error("Frontier generation failed for tile {}, {}", candidate.tileX, candidate.tileZ, thr);
+            }
         } finally {
             this.claimed.remove(new Claim(candidate.level, candidate.tileX, candidate.tileZ));
             this.inFlight.decrementAndGet();
