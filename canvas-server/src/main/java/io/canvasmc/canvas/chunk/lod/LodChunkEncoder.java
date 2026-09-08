@@ -41,7 +41,8 @@ public final class LodChunkEncoder {
 
     static final int SECTION_HEIGHT = 16;
     private static final int SECTION_VOLUME = LodSectionCodec.BLOCK_ENTRIES;
-    private static final int MASK_WORDS = SECTION_VOLUME >> 6;
+    private static final int ROWS = SECTION_VOLUME >> 4;
+    private static final int ROW_MASK = 0xFFFF;
     private static final int LIGHT_LAYER_BYTES = 2048;
 
     private static final Logger LOGGER = LoggerFactory.getLogger("CanvasLOD");
@@ -56,9 +57,9 @@ public final class LodChunkEncoder {
     private static final int LIGHT_DATA = 2;
 
     // outside the world below the build limit counts as opaque
-    private static final long[] ALL_OPAQUE = new long[MASK_WORDS];
+    private static final int[] ALL_OPAQUE = new int[ROWS];
     static {
-        Arrays.fill(ALL_OPAQUE, -1L);
+        Arrays.fill(ALL_OPAQUE, ROW_MASK);
     }
 
     private static final ThreadLocal<Section[]> SECTIONS = new ThreadLocal<>();
@@ -157,7 +158,7 @@ public final class LodChunkEncoder {
         final int sectionCount = level.getSectionsCount();
         final Section[] sections = sections(sectionCount);
 
-        if (!readSections(level, tag, sections, sectionCount)) {
+        if (!readSections(level, tag, sections, sectionCount, cutoffY)) {
             return null;
         }
         if (!isSendable(status, sections, sectionCount)) {
@@ -170,7 +171,7 @@ public final class LodChunkEncoder {
             final FriendlyByteBuf sectionBuf = new FriendlyByteBuf(sectionBytes);
             final LightMasks lights = new LightMasks(sectionCount + 2, sendLight, sendBlockLight);
 
-            if (!writeSections(sectionBuf, level, sections, sectionCount, cutoffY, hollow, lights)) {
+            if (!writeSections(sectionBuf, level, sections, sectionCount, hollow, lights)) {
                 return null;
             }
 
@@ -192,7 +193,7 @@ public final class LodChunkEncoder {
         }
     }
 
-    private static boolean readSections(final ServerLevel level, final CompoundTag tag, final Section[] sections, final int sectionCount) {
+    private static boolean readSections(final ServerLevel level, final CompoundTag tag, final Section[] sections, final int sectionCount, final int cutoffY) {
         for (int i = 0; i < sectionCount; ++i) {
             sections[i].reset();
         }
@@ -227,7 +228,9 @@ public final class LodChunkEncoder {
             final CompoundTag biomes = sectionTag.getCompound("biomes").orElse(null);
             section.hasBiomes = biomes != null && codec.readBiomes(biomes, biomeRegistry, biomeIds, section.biomes);
 
-            final CompoundTag blockStates = sectionTag.getCompound("block_states").orElse(null);
+            // a truncated section goes out as air, so its blocks are never read
+            section.truncated = (level.getSectionYFromSectionIndex(index) * SECTION_HEIGHT) + (SECTION_HEIGHT - 1) < cutoffY;
+            final CompoundTag blockStates = section.truncated ? null : sectionTag.getCompound("block_states").orElse(null);
             if (blockStates == null) {
                 continue;
             }
@@ -247,7 +250,6 @@ public final class LodChunkEncoder {
         final ServerLevel level,
         final Section[] sections,
         final int sectionCount,
-        final int cutoffY,
         final boolean hollow,
         final LightMasks lights
     ) {
@@ -257,10 +259,7 @@ public final class LodChunkEncoder {
         if (hollow) {
             final boolean lavaOccludes = level.paperConfig().anticheat.antiXray.lavaObscures;
             for (int index = 0; index < sectionCount; ++index) {
-                final int sectionMinY = level.getSectionYFromSectionIndex(index) * SECTION_HEIGHT;
-                // a truncated section goes out empty, so nothing above it may count it as cover
-                final boolean truncated = sectionMinY + (SECTION_HEIGHT - 1) < cutoffY;
-                sections[index].fillOpaque(truncated, lavaOccludes);
+                sections[index].fillOpaque(lavaOccludes);
             }
 
             for (int index = 0; index < sectionCount; ++index) {
@@ -274,11 +273,8 @@ public final class LodChunkEncoder {
         boolean anyVisible = false;
         for (int index = 0; index < sectionCount; ++index) {
             final Section section = sections[index];
-            final int sectionMinY = level.getSectionYFromSectionIndex(index) * SECTION_HEIGHT;
             final int lightIndex = index + 1; // light masks start one section below the world
-
-            final boolean truncated = sectionMinY + (SECTION_HEIGHT - 1) < cutoffY;
-            final boolean empty = truncated || !section.present || section.nonEmpty == 0;
+            final boolean empty = section.truncated || !section.present || section.nonEmpty == 0;
 
             if (empty) {
                 section.writeEmpty(out, defaultBiome);
@@ -288,7 +284,7 @@ public final class LodChunkEncoder {
             }
 
             // a section hollowing or the cutoff emptied was fully buried, so its light was already zero
-            if (empty && section.present) {
+            if (section.truncated || (empty && section.present)) {
                 lights.markEmpty(lightIndex);
             } else {
                 lights.add(lightIndex, section);
@@ -334,6 +330,25 @@ public final class LodChunkEncoder {
         }
     }
 
+    // a block is buried when every neighbour hides it, and a neighbour in the next column counts as cover rather than
+    // leaking the block. one 16 bit x row at a time, so the six tests are six ands
+    static int coveredRow(final int[] opaque, final int row, final int @Nullable [] below, final int @Nullable [] above) {
+        final int self = opaque[row];
+        if (self == 0) {
+            return 0;
+        }
+
+        final int z = row & 15;
+        final int y = row >> 4;
+
+        return self
+            & ((self << 1) | 1) & ((self >>> 1) | 0x8000)
+            & (z > 0 ? opaque[row - 1] : ROW_MASK)
+            & (z < 15 ? opaque[row + 1] : ROW_MASK)
+            & (y > 0 ? opaque[row - 16] : (below == null ? 0 : below[ROWS - 16 + z]))
+            & (y < 15 ? opaque[row + 16] : (above == null ? 0 : above[z]));
+    }
+
     private static Section[] sections(final int sectionCount) {
         Section[] sections = SECTIONS.get();
         if (sections == null || sections.length < sectionCount) {
@@ -376,11 +391,12 @@ public final class LodChunkEncoder {
         private final LodSectionCodec.Container biomes = new LodSectionCodec.Container();
         private final int[] values = new int[SECTION_VOLUME];
         private final int[] biomeValues = new int[LodSectionCodec.BIOME_ENTRIES];
-        private final long[] opaque = new long[MASK_WORDS];
+        private final int[] opaque = new int[ROWS];
 
         private int[] paletteFlags = new int[16];
 
         private boolean present;
+        private boolean truncated;
         private boolean hasBiomes;
         private boolean modified;
         private int nonEmpty;
@@ -393,6 +409,7 @@ public final class LodChunkEncoder {
 
         private void reset() {
             this.present = false;
+            this.truncated = false;
             this.hasBiomes = false;
             this.modified = false;
             this.nonEmpty = 0;
@@ -401,7 +418,7 @@ public final class LodChunkEncoder {
             this.blockLight = null;
             this.skyState = LIGHT_STATE_UNKNOWN;
             this.blockState = LIGHT_STATE_UNKNOWN;
-            Arrays.fill(this.opaque, 0L);
+            Arrays.fill(this.opaque, 0);
         }
 
         private void decode() {
@@ -437,10 +454,10 @@ public final class LodChunkEncoder {
             this.fluids = fluids;
         }
 
-        // one bit per block, set when the block hides whatever is behind it
-        private void fillOpaque(final boolean truncated, final boolean lavaOccludes) {
-            if (truncated || !this.present || this.nonEmpty == 0) {
-                Arrays.fill(this.opaque, 0L);
+        // one bit per block, set when the block hides whatever is behind it, packed as a 16 bit x row per (y, z)
+        private void fillOpaque(final boolean lavaOccludes) {
+            if (this.truncated || !this.present || this.nonEmpty == 0) {
+                Arrays.fill(this.opaque, 0);
                 return;
             }
 
@@ -453,18 +470,18 @@ public final class LodChunkEncoder {
             }
 
             if (occluding == 0) {
-                Arrays.fill(this.opaque, 0L);
+                Arrays.fill(this.opaque, 0);
                 return;
             }
             if (occluding == paletteSize) {
-                Arrays.fill(this.opaque, -1L);
+                Arrays.fill(this.opaque, ROW_MASK);
                 return;
             }
 
-            Arrays.fill(this.opaque, 0L);
+            Arrays.fill(this.opaque, 0);
             for (int i = 0; i < SECTION_VOLUME; ++i) {
                 if (this.occludes(this.values[i], lavaOccludes)) {
-                    this.opaque[i >> 6] |= 1L << (i & 63);
+                    this.opaque[i >> 4] |= 1 << (i & 15);
                 }
             }
         }
@@ -475,26 +492,23 @@ public final class LodChunkEncoder {
                 || (lavaOccludes && LodSectionCodec.isLava(this.blocks.palette[local]));
         }
 
-        private void hollow(final long @Nullable [] below, final long @Nullable [] above) {
+        private void hollow(final int @Nullable [] below, final int @Nullable [] above) {
             if (!this.present || this.nonEmpty == 0) {
                 return;
             }
 
+            final int[] opaque = this.opaque;
             int airLocal = -1;
             int buried = 0;
 
-            // only an opaque block can be buried, so the non-opaque bits are skipped outright
-            for (int word = 0; word < MASK_WORDS; ++word) {
-                long bits = this.opaque[word];
-                while (bits != 0L) {
-                    final int shift = Long.numberOfTrailingZeros(bits);
-                    bits &= bits - 1L;
+            for (int row = 0; row < ROWS; ++row) {
+                int covered = coveredRow(opaque, row, below, above);
 
-                    final int index = (word << 6) | shift;
-                    if (!isBuried(this.opaque, below, above, index)) {
-                        continue;
-                    }
+                while (covered != 0) {
+                    final int x = Integer.numberOfTrailingZeros(covered);
+                    covered &= covered - 1;
 
+                    final int index = (row << 4) | x;
                     if (airLocal < 0) {
                         airLocal = this.blocks.add(LodSectionCodec.airStateId());
                     }
@@ -548,37 +562,6 @@ public final class LodChunkEncoder {
                 this.biomes.writeVerbatim(out);
             }
         }
-    }
-
-    // unknown neighbours in the next column count as opaque, so a border block is culled rather than leaked
-    private static boolean isBuried(final long[] opaque, final long @Nullable [] below, final long @Nullable [] above, final int index) {
-        final int x = index & 15;
-        final int z = (index >> 4) & 15;
-        final int y = (index >> 8) & 15;
-
-        if ((x > 0 && !opaqueAt(opaque, index - 1)) || (x < 15 && !opaqueAt(opaque, index + 1))) {
-            return false;
-        }
-        if ((z > 0 && !opaqueAt(opaque, index - 16)) || (z < 15 && !opaqueAt(opaque, index + 16))) {
-            return false;
-        }
-
-        if (y > 0) {
-            if (!opaqueAt(opaque, index - 256)) {
-                return false;
-            }
-        } else if (!opaqueAt(below, index + (15 << 8))) {
-            return false;
-        }
-
-        if (y < 15) {
-            return opaqueAt(opaque, index + 256);
-        }
-        return opaqueAt(above, index - (15 << 8));
-    }
-
-    private static boolean opaqueAt(final long @Nullable [] mask, final int index) {
-        return mask != null && (mask[index >> 6] & (1L << (index & 63))) != 0L;
     }
 
     private static final class LightMasks {
