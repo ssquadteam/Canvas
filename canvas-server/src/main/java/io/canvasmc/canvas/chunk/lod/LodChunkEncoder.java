@@ -188,7 +188,11 @@ public final class LodChunkEncoder {
         final RegistryFriendlyByteBuf dataBuf = new RegistryFriendlyByteBuf(packetBytes, level.registryAccess());
         dataBuf.writeInt(pos.x());
         dataBuf.writeInt(pos.z());
-        writeHeightmaps(dataBuf, heightmaps(tag, status));
+        if (needsHeightmaps(hollow, cutoffY, level.getMinY())) {
+            writeHeightmaps(dataBuf, heightmaps(tag, status));
+        } else {
+            dataBuf.writeVarInt(0);
+        }
         dataBuf.writeVarInt(sectionBytes.readableBytes());
         dataBuf.writeBytes(sectionBytes);
         dataBuf.writeVarInt(0); // block entities are sent on promotion instead
@@ -313,6 +317,10 @@ public final class LodChunkEncoder {
             }
         }
         return false;
+    }
+
+    static boolean needsHeightmaps(final boolean hollow, final int cutoffY, final int minY) {
+        return !hollow && cutoffY <= minY;
     }
 
     private static Map<Heightmap.Types, long[]> heightmaps(final CompoundTag tag, final ChunkStatus status) {

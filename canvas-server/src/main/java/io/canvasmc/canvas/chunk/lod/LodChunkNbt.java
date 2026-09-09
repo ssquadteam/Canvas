@@ -334,9 +334,10 @@ public final class LodChunkNbt {
     private record ByteSlice(byte[] bytes, int length) {
     }
 
-    private static boolean keepRoot(final String id) {
+    private static boolean keepRoot(final String id, final boolean keepHeightmaps) {
         return switch (id) {
-            case "Status", "xPos", "zPos", "Heightmaps", "sections" -> true;
+            case "Status", "xPos", "zPos", "sections" -> true;
+            case "Heightmaps" -> keepHeightmaps;
             default -> false;
         };
     }
@@ -351,6 +352,7 @@ public final class LodChunkNbt {
     private static final class Collector extends CollectToTag {
 
         private final int cutoffY;
+        private final boolean keepHeightmaps;
         private boolean inSections;
         private boolean inSection;
         private boolean awaitingY;
@@ -358,6 +360,7 @@ public final class LodChunkNbt {
 
         private Collector(final int cutoffY) {
             this.cutoffY = cutoffY;
+            this.keepHeightmaps = cutoffY == LodChunkEncoder.NO_CUTOFF;
         }
 
         @Override
@@ -373,7 +376,7 @@ public final class LodChunkNbt {
                 return keepSection(id) ? super.visitEntry(type, id) : StreamTagVisitor.EntryResult.SKIP;
             }
             if (this.depth() == 1) {
-                if (!keepRoot(id)) {
+                if (!keepRoot(id, this.keepHeightmaps)) {
                     return StreamTagVisitor.EntryResult.SKIP;
                 }
                 if ("sections".equals(id)) {
