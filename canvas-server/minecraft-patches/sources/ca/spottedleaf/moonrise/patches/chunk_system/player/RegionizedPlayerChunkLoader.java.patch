@@ -1,6 +1,32 @@
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
-@@ -412,6 +_,35 @@
+@@ -21,6 +_,7 @@
+ import it.unimi.dsi.fastutil.longs.LongArrayList;
+ import it.unimi.dsi.fastutil.longs.LongComparator;
+ import it.unimi.dsi.fastutil.longs.LongHeapPriorityQueue;
++import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
+ import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
+ import net.minecraft.network.protocol.Packet;
+ import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
+@@ -218,7 +_,7 @@
+         final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
+ 
+         if (loader == null) {
+-            return;
++            throw new IllegalStateException("Player is already removed from player chunk loader"); // Folia - region threading
+         }
+ 
+         loader.remove();
+@@ -306,7 +_,7 @@
+     public void tick() {
+         TickThread.ensureTickThread("Cannot tick player chunk loader async");
+         long currTime = System.nanoTime();
+-        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
++        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.getLocalPlayers())) { // Folia - region threading
+             final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
+             if (loader == null || loader.removed || loader.world != this.world) {
+                 // not our problem anymore
+@@ -412,6 +_,39 @@
          private final LongHeapPriorityQueue loadingQueue = new LongHeapPriorityQueue(this.queueComparator);
          private final LongHeapPriorityQueue loadQueue = new LongHeapPriorityQueue(this.queueComparator);
  
@@ -33,10 +59,14 @@
 +        ) {}
 +        // Canvas end - native LOD chunks
 +
++        private final LongOpenHashSet antiFreecamCut = new LongOpenHashSet();
++        private final LongLinkedOpenHashSet antiFreecamResend = new LongLinkedOpenHashSet();
++        private int lastAntiFreecamHideY = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF;
++
          private volatile boolean removed;
  
          public PlayerChunkLoaderData(final ServerLevel world, final ServerPlayer player) {
-@@ -432,6 +_,7 @@
+@@ -432,6 +_,9 @@
          }
  
          private void sendChunk(final int chunkX, final int chunkZ) {
@@ -46,14 +76,19 @@
              if (this.sentChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
                  ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
                          .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$addReceivedChunk(this.player);
-@@ -439,25 +_,77 @@
+@@ -439,25 +_,86 @@
                  final LevelChunk chunk = ((ChunkSystemLevel)this.world).moonrise$getFullChunkIfLoaded(chunkX, chunkZ);
  
                  PlatformHooks.get().onChunkWatch(this.world, chunk, this.player);
 +                // Canvas start - native LOD chunks - promote without a second terrain packet
 +                // the client already holds this terrain, re-sending it would rebuild the mesh for nothing.
 +                // a truncated column falls through, it really is missing blocks
-+                if (lodState == LOD_STATE_DISK || lodState == LOD_STATE_REAL) {
++                if (lodState == LOD_STATE_REAL
++                    || (lodState == LOD_STATE_DISK && (
++                        !io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.enabled(this.world)
++                            || io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.hideBelowY(this.player)
++                                != io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF
++                    ))) {
 +                    this.completeLodPromotion(chunk);
 +                    return;
 +                }
@@ -91,7 +126,9 @@
 +            final long lodKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
 +            final byte lodState = this.lodChunks.remove(lodKey);
 +            this.releaseLodCache(lodKey, lodState);
-              if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
++            this.antiFreecamCut.remove(lodKey);
++            this.antiFreecamResend.remove(lodKey);
+             if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
 +                if (lodState != LOD_STATE_NONE && lodState != LOD_STATE_MISSING) {
 +                    // already unwatched when it was demoted, so only the client needs telling
 +                    this.sendForgetChunk(chunkX, chunkZ);
@@ -129,7 +166,7 @@
              this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
              // Paper start - PlayerChunkUnloadEvent
              if (io.papermc.paper.event.packet.PlayerChunkUnloadEvent.getHandlerList().getRegisteredListeners().length > 0) {
-@@ -466,6 +_,41 @@
+@@ -466,6 +_,47 @@
              // Paper end - PlayerChunkUnloadEvent
          }
  
@@ -141,11 +178,17 @@
 +                return;
 +            }
 +
++            this.antiFreecamResend.remove(chunk);
 +            this.unwatchChunk(chunkX, chunkZ);
 +
 +            if (this.lastLodDistance > 0 && this.inLodRing(chunkX, chunkZ)) {
 +                // the client keeps the real terrain it already has, no forget and no LOD overwrite
-+                this.lodChunks.put(chunk, LOD_STATE_REAL);
++                if (this.antiFreecamCut.remove(chunk)) {
++                    this.lodChunks.put(chunk, LOD_STATE_TRUNCATED);
++                } else {
++                    this.lodChunks.put(chunk, LOD_STATE_REAL);
++                }
++                this.antiFreecamResend.remove(chunk);
 +                return;
 +            }
 +
@@ -171,11 +214,12 @@
          private final SingleUserAreaMap<PlayerChunkLoaderData> broadcastMap = new SingleUserAreaMap<>(this) {
              @Override
              protected void addCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
-@@ -866,6 +_,8 @@
+@@ -866,6 +_,9 @@
                  }
              }
  
 +            this.tickLod(); // Canvas - native LOD chunks
++            this.tickAntiFreecam();
 +
              this.flushDelayedTicketOps();
          }
@@ -322,7 +366,7 @@
              // sends the chunk unload packets
              this.broadcastMap.remove();
              // cleans up loading/generating tickets
-@@ -1083,6 +_,15 @@
+@@ -1083,6 +_,20 @@
              // cleans up ticking tickets
              this.tickMap.remove();
  
@@ -337,15 +381,16 @@
 +            }
 +            this.lodChunks.clear();
 +            // Canvas end - native LOD chunks
++            this.antiFreecamCut.clear();
++            this.antiFreecamResend.clear();
 +
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1096,6 +_,228 @@
- 
+@@ -1097,6 +_,248 @@
              // now all tickets should be removed, which is all of our external state
          }
-+
+ 
 +        // Canvas start - native LOD chunks
 +        private static int capLodViewDistance(final int requested, final int sendViewDistance, final int clientViewDistance) {
 +            if (requested <= 0) {
@@ -546,6 +591,48 @@
 +            }
 +        }
 +        // Canvas end - native LOD chunks
- 
++
++        public void canvas$noteAntiFreecam(final long chunkKey, final boolean cut) {
++            if (cut) {
++                this.antiFreecamCut.add(chunkKey);
++            } else {
++                this.antiFreecamCut.remove(chunkKey);
++            }
++        }
++
++        private void tickAntiFreecam() {
++            final int hideY = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.hideBelowY(this.player);
++            if (hideY != this.lastAntiFreecamHideY) {
++                this.lastAntiFreecamHideY = hideY;
++                this.antiFreecamResend.clear();
++                if (hideY == io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF) {
++                    this.antiFreecamResend.addAll(this.antiFreecamCut);
++                    this.antiFreecamCut.clear();
++                } else {
++                    this.antiFreecamResend.addAll(this.sentChunks);
++                }
++            }
++            int budget = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.RESEND_PER_TICK;
++            while (budget-- > 0 && !this.antiFreecamResend.isEmpty()) {
++                final long chunkKey = this.antiFreecamResend.firstLong();
++                if (!this.sentChunks.contains(chunkKey)) {
++                    this.antiFreecamResend.removeFirstLong();
++                    continue;
++                }
++                final int chunkX = CoordinateUtils.getChunkX(chunkKey);
++                final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
++                final LevelChunk chunk = ((ChunkSystemLevel) this.world).moonrise$getFullChunkIfLoaded(chunkX, chunkZ);
++                if (chunk == null || !TickThread.isTickThreadFor(this.world, chunkX, chunkZ)) {
++                    break;
++                }
++                this.antiFreecamResend.removeFirstLong();
++                PlayerChunkSender.sendChunk(this.player.connection, this.world, chunk);
++                if (this.removed) {
++                    return;
++                }
++            }
++        }
++
          public LongOpenHashSet getSentChunksRaw() {
              return this.sentChunks;
+         }

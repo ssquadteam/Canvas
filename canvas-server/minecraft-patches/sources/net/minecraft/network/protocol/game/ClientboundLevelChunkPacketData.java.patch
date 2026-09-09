@@ -1,11 +1,33 @@
 --- a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
 +++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
-@@ -61,17 +_,17 @@
+@@ -47,31 +_,37 @@
+         this(levelChunk, null);
+     }
+     public ClientboundLevelChunkPacketData(final LevelChunk levelChunk, final io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo) {
++        this(levelChunk, chunkPacketInfo, io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF);
++    }
++    public ClientboundLevelChunkPacketData(final LevelChunk levelChunk, final io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo, final int hideBelowY) {
+         // Paper end - Anti-Xray - Add chunk packet info
+         this.heightmaps = levelChunk.getHeightmaps()
+             .stream()
+             .filter(entryx -> ((Heightmap.Types)entryx.getKey()).sendToClient())
+             .collect(Collectors.toMap(Entry::getKey, entryx -> (long[])((Heightmap)entryx.getValue()).getRawData().clone()));
+-        this.buffer = new byte[calculateChunkSize(levelChunk)];
++        this.buffer = new byte[calculateChunkSize(levelChunk, hideBelowY)];
+         // Paper start - Anti-Xray - Add chunk packet info
+         if (chunkPacketInfo != null) {
+             chunkPacketInfo.setBuffer(this.buffer);
+         }
+-        extractChunkData(new FriendlyByteBuf(this.getWriteBuffer()), levelChunk, chunkPacketInfo);
++        extractChunkData(new FriendlyByteBuf(this.getWriteBuffer()), levelChunk, chunkPacketInfo, hideBelowY);
          this.blockEntitiesData = Lists.newArrayList();
          int totalTileEntities = 0; // Paper - Handle oversized block entities in chunks
  
 -        for (Entry<BlockPos, BlockEntity> entry : levelChunk.getBlockEntities().entrySet()) {
 +        for (BlockEntity blockEntity : levelChunk.canvas$getAllBlockEntities()) { // Canvas - optimize block entity fetching
++            if (hideBelowY != io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF && blockEntity.getBlockPos().getY() < hideBelowY) {
++                continue;
++            }
              // Paper start - Handle oversized block entities in chunks
              if (++totalTileEntities > BLOCK_ENTITY_LIMIT) {
 -                net.minecraft.network.protocol.Packet<ClientGamePacketListener> packet = entry.getValue().getUpdatePacket();
@@ -21,3 +43,45 @@
          }
      }
  
+@@ -94,11 +_,20 @@
+         ClientboundLevelChunkPacketData.BlockEntityInfo.LIST_STREAM_CODEC.encode(output, this.blockEntitiesData);
+     }
+ 
+-    private static int calculateChunkSize(final LevelChunk chunk) {
++    private static int calculateChunkSize(final LevelChunk chunk, final int hideBelowY) {
+         int total = 0;
++        int sectionIndex = 0;
++        final int emptySize = hideBelowY == io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF
++            ? 0
++            : io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.emptySerializedSize(chunk.getLevel().palettedContainerFactory());
+ 
+         for (LevelChunkSection section : chunk.getSections()) {
+-            total += section.getSerializedSize();
++            final int sectionMinY = SectionPos.sectionToBlockCoord(chunk.getSectionYFromSectionIndex(sectionIndex++));
++            if (hideBelowY != io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF && sectionMinY < hideBelowY) {
++                total += emptySize;
++            } else {
++                total += section.getSerializedSize();
++            }
+         }
+ 
+         return total;
+@@ -116,9 +_,17 @@
+         extractChunkData(buffer, chunk, null);
+     }
+     public static void extractChunkData(final FriendlyByteBuf buffer, final LevelChunk chunk, final io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo) {
++        extractChunkData(buffer, chunk, chunkPacketInfo, io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF);
++    }
++    public static void extractChunkData(final FriendlyByteBuf buffer, final LevelChunk chunk, final io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo, final int hideBelowY) {
+         int chunkSectionIndex = 0;
+         for (LevelChunkSection section : chunk.getSections()) {
+-            section.write(buffer, chunkPacketInfo, chunkSectionIndex);
++            final int sectionMinY = SectionPos.sectionToBlockCoord(chunk.getSectionYFromSectionIndex(chunkSectionIndex));
++            if (hideBelowY != io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF && sectionMinY < hideBelowY) {
++                io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.writeEmpty(buffer, chunk.getLevel().palettedContainerFactory());
++            } else {
++                section.write(buffer, chunkPacketInfo, chunkSectionIndex);
++            }
+             chunkSectionIndex++;
+             // Paper end - Anti-Xray - Add chunk packet info
+         }

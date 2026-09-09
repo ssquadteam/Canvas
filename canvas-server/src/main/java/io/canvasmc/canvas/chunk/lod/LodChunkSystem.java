@@ -5,6 +5,7 @@ import ca.spottedleaf.moonrise.common.util.MoonriseConstants;
 import ca.spottedleaf.moonrise.patches.chunk_system.player.ChunkSystemServerPlayer;
 import ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader;
 import io.canvasmc.canvas.WorldConfig;
+import io.canvasmc.canvas.chunk.antifreecam.AntiFreecam;
 import it.unimi.dsi.fastutil.objects.Object2IntMap;
 import it.unimi.dsi.fastutil.objects.Object2IntMaps;
 import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
@@ -92,14 +93,14 @@ public final class LodChunkSystem implements LodChunkService {
             settings = settings.withCutoffY(playerCutoff);
         }
 
-        return this.applyResolvers(player.getBukkitEntity(), level, settings);
+        return this.applyAntiFreecam(level, this.applyResolvers(player.getBukkitEntity(), level, settings));
     }
 
     public LodSettings resolve(final ServerLevel level) {
         if (!this.hasOverrides && level.canvasConfig().worldChunkSystem.lodViewDistance <= 0) {
             return LodSettings.DISABLED;
         }
-        return this.applyResolvers(null, level, this.baseSettings(level));
+        return this.applyAntiFreecam(level, this.applyResolvers(null, level, this.baseSettings(level)));
     }
 
     private void updateOverrideFlag() {
@@ -137,6 +138,17 @@ public final class LodChunkSystem implements LodChunkService {
         }
 
         return new LodSettings(Math.max(0, viewDistance), cutoffY);
+    }
+
+    private LodSettings applyAntiFreecam(final ServerLevel level, final LodSettings settings) {
+        if (!settings.enabled()) {
+            return settings;
+        }
+        final int hideY = AntiFreecam.hideBelowY(level);
+        if (hideY == AntiFreecam.NO_CUTOFF || settings.cutoffY() >= hideY) {
+            return settings;
+        }
+        return settings.withCutoffY(hideY);
     }
 
     private LodSettings applyResolvers(final @Nullable Player player, final ServerLevel level, final LodSettings base) {

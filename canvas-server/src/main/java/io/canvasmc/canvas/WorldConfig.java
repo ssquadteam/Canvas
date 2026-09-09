@@ -724,12 +724,24 @@ public class WorldConfig extends Part {
                         "Anti-Xray is enabled, since it is what keeps buried ore out of LOD chunks"
                     )
                 );
+            option("antiFreecam")
+                .docs(
+                    "Hides buried terrain from players at or above antiFreecamRestoreBelowY. Real send-ring columns",
+                    "are cut at encode time, and walking back below restore resends only the columns that were cut"
+                );
+            option("antiFreecamHideBelowY")
+                .docs("Empties real chunk sections below this Y for masking players. Floors to a section boundary");
+            option("antiFreecamRestoreBelowY")
+                .docs("Players below this Y receive full columns again. Keep this above hide so mining still works");
         }
 
         public int lodViewDistance = 0;
         public int lodCutoffY = 0;
         public boolean lodSendLight = true;
         public boolean lodHollowChunks = false;
+        public boolean antiFreecam = false;
+        public int antiFreecamHideBelowY = 16;
+        public int antiFreecamRestoreBelowY = 30;
 
         public boolean lodEnabled() {
             return this.lodViewDistance > 0;
