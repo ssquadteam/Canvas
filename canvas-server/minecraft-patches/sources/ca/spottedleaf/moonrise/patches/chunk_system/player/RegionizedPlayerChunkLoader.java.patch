@@ -8,24 +8,6 @@
  import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
  import net.minecraft.network.protocol.Packet;
  import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
-@@ -218,7 +_,7 @@
-         final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
- 
-         if (loader == null) {
--            return;
-+            throw new IllegalStateException("Player is already removed from player chunk loader"); // Folia - region threading
-         }
- 
-         loader.remove();
-@@ -306,7 +_,7 @@
-     public void tick() {
-         TickThread.ensureTickThread("Cannot tick player chunk loader async");
-         long currTime = System.nanoTime();
--        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
-+        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.getLocalPlayers())) { // Folia - region threading
-             final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
-             if (loader == null || loader.removed || loader.world != this.world) {
-                 // not our problem anymore
 @@ -412,6 +_,39 @@
          private final LongHeapPriorityQueue loadingQueue = new LongHeapPriorityQueue(this.queueComparator);
          private final LongHeapPriorityQueue loadQueue = new LongHeapPriorityQueue(this.queueComparator);
@@ -387,10 +369,12 @@
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1097,6 +_,248 @@
-             // now all tickets should be removed, which is all of our external state
-         }
+@@ -1095,6 +_,248 @@
+             this.flushDelayedTicketOps();
  
+             // now all tickets should be removed, which is all of our external state
++        }
++
 +        // Canvas start - native LOD chunks
 +        private static int capLodViewDistance(final int requested, final int sendViewDistance, final int clientViewDistance) {
 +            if (requested <= 0) {
@@ -631,8 +615,6 @@
 +                    return;
 +                }
 +            }
-+        }
-+
-         public LongOpenHashSet getSentChunksRaw() {
-             return this.sentChunks;
          }
+ 
+         public LongOpenHashSet getSentChunksRaw() {
