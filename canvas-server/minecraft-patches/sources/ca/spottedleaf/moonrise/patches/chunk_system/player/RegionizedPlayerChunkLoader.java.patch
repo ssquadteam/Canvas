@@ -40,7 +40,9 @@
          }
  
          private void sendChunk(final int chunkX, final int chunkZ) {
-+            final byte lodState = this.lodChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ)); // Canvas - native LOD chunks
++            final long lodKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
++            final byte lodState = this.lodChunks.remove(lodKey); // Canvas - native LOD chunks
++            this.releaseLodCache(lodKey, lodState); // Canvas - native LOD chunks
              if (this.sentChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
                  ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
                          .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$addReceivedChunk(this.player);
@@ -86,8 +88,10 @@
          private void sendUnloadChunk(final int chunkX, final int chunkZ) {
 +            // Canvas start - native LOD chunks
 +            // the send ring dropped this long ago, only the client still holds it
-+            final byte lodState = this.lodChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ));
-             if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
++            final long lodKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
++            final byte lodState = this.lodChunks.remove(lodKey);
++            this.releaseLodCache(lodKey, lodState);
+              if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
 +                if (lodState != LOD_STATE_NONE && lodState != LOD_STATE_MISSING) {
 +                    // already unwatched when it was demoted, so only the client needs telling
 +                    this.sendForgetChunk(chunkX, chunkZ);
@@ -328,6 +332,9 @@
 +            this.lodResults.clear();
 +            this.lodReady.clear();
 +            this.lodReadyKeys.clear();
++            for (final it.unimi.dsi.fastutil.longs.Long2ByteMap.Entry mapping : this.lodChunks.long2ByteEntrySet()) {
++                this.releaseLodCache(mapping.getLongKey(), mapping.getByteValue());
++            }
 +            this.lodChunks.clear();
 +            // Canvas end - native LOD chunks
 +
@@ -417,44 +424,16 @@
 +
 +        // never getChunk, never ticket, never generate - this only ever reads what is already on disk
 +        private void requestLod(final long chunkKey) {
-+            final int chunkX = CoordinateUtils.getChunkX(chunkKey);
-+            final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
 +            final int cutoffY = this.lastLodCutoffY;
 +            // a hollowed or truncated column is missing real blocks, so it cannot take the no-resend promote path
 +            final boolean hollow = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.hollows(this.world);
 +            final boolean truncated = hollow || cutoffY > this.world.getMinY();
-+            final io.canvasmc.canvas.chunk.lod.LodChunkCache cache = this.world.canvasLodCache();
-+
-+            final io.canvasmc.canvas.chunk.lod.LodChunkCache.Result cached = cache.get(chunkKey, cutoffY, hollow);
-+            if (cached != null) {
-+                this.lodResults.add(new LodResult(chunkKey, truncated, cached.packet()));
-+                return;
-+            }
-+
-+            io.canvasmc.canvas.chunk.lod.LodChunkNbt.load(
-+                this.world, chunkX, chunkZ, cutoffY, Priority.LOW,
-+                (final net.minecraft.nbt.CompoundTag tag, final Throwable thrown) -> {
-+                    net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet = null;
-+                    try {
-+                        if (thrown != null || tag == null) {
-+                            return;
-+                        }
-+                        final byte[] encoded = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.encode(
-+                            this.world, tag, new ChunkPos(chunkX, chunkZ), cutoffY, hollow,
-+                            io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
-+                            io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendBlockLight(this.world)
-+                        );
-+                        if (encoded != null) {
-+                            packet = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.decode(this.world, encoded);
-+                            cache.put(chunkKey, cutoffY, hollow, packet, encoded.length);
-+                        }
-+                    } finally {
-+                        if (packet == null) {
-+                            cache.putMissing(chunkKey, cutoffY, hollow);
-+                        }
-+                        this.lodResults.add(new LodResult(chunkKey, truncated, packet));
-+                    }
-+                }
++            this.world.canvasLodCache().request(
++                this.world, chunkKey, cutoffY, hollow,
++                io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
++                io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendBlockLight(this.world),
++                (final io.canvasmc.canvas.chunk.lod.LodChunkCache.Result result) ->
++                    this.lodResults.add(new LodResult(chunkKey, truncated, result.packet()))
 +            );
 +        }
 +
@@ -496,6 +475,7 @@
 +                if ((toSend == null || toSend.size() < sendBudget) && this.clientHoldsNeighbor(ready.chunkKey())) {
 +                    this.lodReadyKeys.remove(ready.chunkKey());
 +                    this.lodChunks.put(ready.chunkKey(), ready.truncated() ? LOD_STATE_TRUNCATED : LOD_STATE_DISK);
++                    this.world.canvasLodCache().watch(ready.chunkKey());
 +                    if (toSend == null) {
 +                        toSend = new java.util.ArrayList<>(sendBudget);
 +                    }
@@ -558,6 +538,12 @@
 +
 +        public void canvas$requestLodRefresh() {
 +            this.lodRefreshRequested = true;
++        }
++
++        private void releaseLodCache(final long chunkKey, final byte state) {
++            if (state == LOD_STATE_DISK || state == LOD_STATE_TRUNCATED) {
++                this.world.canvasLodCache().unwatch(chunkKey);
++            }
 +        }
 +        // Canvas end - native LOD chunks
  
