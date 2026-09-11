@@ -1,26 +1,24 @@
 --- a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
 +++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
-@@ -47,12 +_,22 @@
-         final @Nullable BitSet blockChangedLightSectionFilter,
-         final boolean modifyBlocks
-     ) {
-+        this(levelChunk, lightEngine, skyChangedLightSectionFilter, blockChangedLightSectionFilter, modifyBlocks, io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF);
-+    }
-+    public ClientboundLevelChunkWithLightPacket(
-+        final LevelChunk levelChunk,
-+        final LevelLightEngine lightEngine,
-+        final @Nullable BitSet skyChangedLightSectionFilter,
-+        final @Nullable BitSet blockChangedLightSectionFilter,
-+        final boolean modifyBlocks,
-+        final int hideBelowY
-+    ) {
-         // Paper end - Anti-Xray
-         ChunkPos chunkPos = levelChunk.getPos();
-         this.x = chunkPos.x();
-         this.z = chunkPos.z();
-         io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo = modifyBlocks ? levelChunk.getLevel().chunkPacketBlockController.getChunkPacketInfo(this, levelChunk) : null; // Paper - Anti-Xray
--        this.chunkData = new ClientboundLevelChunkPacketData(levelChunk, chunkPacketInfo); // Paper - Anti-Xray
-+        this.chunkData = new ClientboundLevelChunkPacketData(levelChunk, chunkPacketInfo, hideBelowY); // Paper - Anti-Xray
-         this.lightData = new ClientboundLightUpdatePacketData(chunkPos, lightEngine, skyChangedLightSectionFilter, blockChangedLightSectionFilter);
+@@ -57,6 +_,21 @@
          levelChunk.getLevel().chunkPacketBlockController.modifyBlocks(this, chunkPacketInfo); // Paper - Anti-Xray - Modify blocks
      }
+ 
++    // Canvas start - extended view distance
++    public ClientboundLevelChunkWithLightPacket(
++        final int x,
++        final int z,
++        final ClientboundLevelChunkPacketData chunkData,
++        final ClientboundLightUpdatePacketData lightData
++    ) {
++        this.x = x;
++        this.z = z;
++        this.chunkData = chunkData;
++        this.lightData = lightData;
++        this.ready = true;
++    }
++    // Canvas end - extended view distance
++
+     private ClientboundLevelChunkWithLightPacket(final RegistryFriendlyByteBuf input) {
+         this.x = input.readInt();
+         this.z = input.readInt();

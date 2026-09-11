@@ -28,7 +28,7 @@ import static net.minecraft.commands.Commands.literal;
 public class WorldDistanceSubCommand implements SubCommand {
 
     private static final SimpleCommandExceptionType ILLEGAL_TYPE_ARG = new SimpleCommandExceptionType(
-        Component.literal("Illegal type argument. Must be [\"view\", \"simulation\", \"lod\", \"v\", \"s\", \"sim\", or \"l\"]")
+        Component.literal("Illegal type argument. Must be [\"view\", \"simulation\", \"lod\", \"visual\", \"vv\", \"v\", \"s\", \"sim\", or \"l\"]")
     );
     private static final SimpleCommandExceptionType INVALID_DISTANCE = new SimpleCommandExceptionType(
         Component.literal("New value must be above 0")
@@ -50,6 +50,8 @@ public class WorldDistanceSubCommand implements SubCommand {
                     builder.suggest("view");
                     builder.suggest("simulation");
                     builder.suggest("lod");
+                    builder.suggest("visual");
+                    builder.suggest("vv");
                     return builder.buildFuture();
                 })
                 .then(argument("dimension", DimensionArgument.dimension())
@@ -173,7 +175,7 @@ public class WorldDistanceSubCommand implements SubCommand {
             return switch (lower) {
                 case "view", "v" -> VIEW;
                 case "simulation", "sim", "s" -> SIMULATION;
-                case "lod", "l" -> LOD;
+                case "lod", "l", "visual", "vv" -> LOD;
                 default -> throw ILLEGAL_TYPE_ARG.create();
             };
         }

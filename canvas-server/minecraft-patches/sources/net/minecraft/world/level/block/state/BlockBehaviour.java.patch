@@ -25,3 +25,16 @@
  
          private static void initCaches(final VoxelShape shape, final boolean neighbours) {
              ((ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape)shape).moonrise$isFullBlock();
+@@ -802,6 +_,12 @@
+         public final boolean canOcclude() { // Paper - Perf: Final for inlining
+             return this.canOcclude;
+         }
++
++        // Canvas start - extended view distance
++        public boolean isSeeThrough() {
++            return !this.canOcclude();
++        }
++        // Canvas end - extended view distance
+ 
+         public boolean skipRendering(final BlockState neighborState, final Direction direction) {
+             return this.getBlock().skipRendering(this.asState(), neighborState, direction);

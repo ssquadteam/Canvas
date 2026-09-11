@@ -702,46 +702,29 @@ public class WorldConfig extends Part {
                     "never loaded or ticked on the server. Best used on pre-generated worlds, nothing is ever generated"
                 ).greaterThanOrEqualTo(0);
             option("lodCutoffY")
-                .docs("Empties LOD chunks below this Y level, trimming data clients never see at range");
+                .docs("Kept for the LodChunkService API; the extended-view encoder does not apply a Y cutoff");
         }
 
         {
-            option("lodSendLight")
-                .docs(
-                    "Sends light data with LOD chunks. Turning this off roughly halves the bytes an LOD chunk costs,",
-                    "but distant terrain then renders black, so only do it while measuring bandwidth"
-                );
             option("lodHollowChunks")
                 .docs(
                     Style.wrap(
                         "EXPERIMENTAL. Drops every block that no neighbour leaves visible, keeping only the surface,",
-                        "cave walls and cliff faces. Shrinks LOD chunks a lot, recommended on"
+                        "cave walls and cliff faces. Shrinks extended-view chunks a lot, recommended on"
                     )
                     .blank()
                     .wordWrap(
                         "The cost is that a hollowed column is missing real blocks, so walking into it sends the real",
-                        "chunk again and the client rebuilds the mesh. This is forced on regardless of this option when",
-                        "Anti-Xray is enabled, since it is what keeps buried ore out of LOD chunks"
+                        "chunk again and the client rebuilds the mesh"
                     )
                 );
-            option("antiFreecam")
-                .docs(
-                    "Hides buried terrain from players at or above antiFreecamRestoreBelowY. Real send-ring columns",
-                    "are cut at encode time, and walking back below restore resends only the columns that were cut"
-                );
-            option("antiFreecamHideBelowY")
-                .docs("Empties real chunk sections below this Y for masking players. Floors to a section boundary");
-            option("antiFreecamRestoreBelowY")
-                .docs("Players below this Y receive full columns again. Keep this above hide so mining still works");
         }
 
         public int lodViewDistance = 0;
         public int lodCutoffY = 0;
-        public boolean lodSendLight = true;
-        public boolean lodHollowChunks = false;
-        public boolean antiFreecam = false;
-        public int antiFreecamHideBelowY = 16;
-        public int antiFreecamRestoreBelowY = 30;
+        public boolean lodHollowChunks = true;
+        @Undocumented("Doesn't require docs.")
+        public boolean hideOres = true;
 
         public boolean lodEnabled() {
             return this.lodViewDistance > 0;

@@ -1,0 +1,27 @@
+--- a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
++++ b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
+@@ -47,6 +_,26 @@
+             }
+         }
+     }
++
++    // Canvas start - extended view distance
++    public ClientboundLightUpdatePacketData(
++        final BitSet skyYMask,
++        final BitSet blockYMask,
++        final BitSet emptySkyYMask,
++        final BitSet emptyBlockYMask,
++        final List<byte[]> skyUpdates,
++        final List<byte[]> blockUpdates
++    ) {
++        this.skyYMask = skyYMask;
++        this.blockYMask = blockYMask;
++        this.emptySkyYMask = emptySkyYMask;
++        this.emptyBlockYMask = emptyBlockYMask;
++        this.skyUpdates = skyUpdates;
++        this.blockUpdates = blockUpdates;
++    }
++    // Canvas end - extended view distance
+ 
+     public ClientboundLightUpdatePacketData(final FriendlyByteBuf input, final int x, final int z) {
+         this.skyYMask = input.readBitSet();

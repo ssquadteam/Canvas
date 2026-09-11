@@ -1,132 +1,94 @@
 --- a/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
 +++ b/ca/spottedleaf/moonrise/patches/chunk_system/player/RegionizedPlayerChunkLoader.java
-@@ -21,6 +_,7 @@
+@@ -21,7 +_,11 @@
  import it.unimi.dsi.fastutil.longs.LongArrayList;
  import it.unimi.dsi.fastutil.longs.LongComparator;
  import it.unimi.dsi.fastutil.longs.LongHeapPriorityQueue;
-+import it.unimi.dsi.fastutil.longs.LongLinkedOpenHashSet;
++import it.unimi.dsi.fastutil.longs.LongIterator;
  import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
++import io.canvasmc.canvas.extendedview.ExtendedViewDistance;
++import io.canvasmc.canvas.extendedview.Result;
++import java.util.concurrent.CompletableFuture;
  import net.minecraft.network.protocol.Packet;
  import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
-@@ -412,6 +_,39 @@
+ import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
+@@ -218,7 +_,7 @@
+         final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
+ 
+         if (loader == null) {
+-            return;
++            throw new IllegalStateException("Player is already removed from player chunk loader"); // Folia - region threading
+         }
+ 
+         loader.remove();
+@@ -306,7 +_,7 @@
+     public void tick() {
+         TickThread.ensureTickThread("Cannot tick player chunk loader async");
+         long currTime = System.nanoTime();
+-        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
++        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.getLocalPlayers())) { // Folia - region threading
+             final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
+             if (loader == null || loader.removed || loader.world != this.world) {
+                 // not our problem anymore
+@@ -412,6 +_,15 @@
          private final LongHeapPriorityQueue loadingQueue = new LongHeapPriorityQueue(this.queueComparator);
          private final LongHeapPriorityQueue loadQueue = new LongHeapPriorityQueue(this.queueComparator);
  
-+        // Canvas start - native LOD chunks
-+        private static final byte LOD_STATE_NONE      = 0;
-+        private static final byte LOD_STATE_DISK      = 1; // client holds a disk sourced column
-+        private static final byte LOD_STATE_TRUNCATED = 2; // ... which was cut off below the Y cutoff
-+        private static final byte LOD_STATE_REAL      = 3; // client holds real terrain we stopped ticketing
-+        private static final byte LOD_STATE_MISSING   = 4; // nothing usable on disk, do not retry until it leaves the ring
-+
-+        private final Long2ByteOpenHashMap lodChunks = new Long2ByteOpenHashMap();
-+        {
-+            this.lodChunks.defaultReturnValue(LOD_STATE_NONE);
-+        }
-+        private final LongHeapPriorityQueue lodQueue = new LongHeapPriorityQueue(this.queueComparator);
-+        private final LongOpenHashSet lodInflight = new LongOpenHashSet();
-+        private final java.util.concurrent.ConcurrentLinkedQueue<LodResult> lodResults = new java.util.concurrent.ConcurrentLinkedQueue<>();
-+        private final java.util.List<LodResult> lodReady = new java.util.ArrayList<>();
-+        private final LongOpenHashSet lodReadyKeys = new LongOpenHashSet();
-+        private final java.util.Comparator<LodResult> lodReadyOrder = (final LodResult first, final LodResult second) ->
-+            Long.compare(this.chunkDistanceSq(first.chunkKey()), this.chunkDistanceSq(second.chunkKey()));
++        // Canvas start - extended view distance
++        private final LongOpenHashSet fakeChunks = new LongOpenHashSet();
++        private final LongOpenHashSet pendingForget = new LongOpenHashSet();
++        private final LongHeapPriorityQueue vvBuildQueue = new LongHeapPriorityQueue(this.queueComparator);
++        private final LongArrayList vvBuildingQueue = new LongArrayList();
 +        private volatile boolean lodRefreshRequested;
-+        private int lastLodDistance;
-+        private int lastLodCutoffY = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.NO_CUTOFF;
-+
-+        private record LodResult(
-+            long chunkKey,
-+            boolean truncated,
-+            net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet
-+        ) {}
-+        // Canvas end - native LOD chunks
-+
-+        private final LongOpenHashSet antiFreecamCut = new LongOpenHashSet();
-+        private final LongLinkedOpenHashSet antiFreecamResend = new LongLinkedOpenHashSet();
-+        private int lastAntiFreecamHideY = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF;
++        private int lastVVDistance = Integer.MIN_VALUE;
++        // Canvas end - extended view distance
 +
          private volatile boolean removed;
  
          public PlayerChunkLoaderData(final ServerLevel world, final ServerPlayer player) {
-@@ -432,6 +_,9 @@
+@@ -432,7 +_,13 @@
          }
  
          private void sendChunk(final int chunkX, final int chunkZ) {
-+            final long lodKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+            final byte lodState = this.lodChunks.remove(lodKey); // Canvas - native LOD chunks
-+            this.releaseLodCache(lodKey, lodState); // Canvas - native LOD chunks
-             if (this.sentChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
+-            if (this.sentChunks.add(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
++            final long chunkKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
++            this.pendingForget.remove(chunkKey);
++            if (this.fakeChunks.remove(chunkKey)) {
++                this.sentChunks.remove(chunkKey);
++                this.world.extendedViewDistance().cache.unwatch(chunkKey);
++            }
++            if (this.sentChunks.add(chunkKey)) {
                  ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
                          .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$addReceivedChunk(this.player);
-@@ -439,25 +_,86 @@
-                 final LevelChunk chunk = ((ChunkSystemLevel)this.world).moonrise$getFullChunkIfLoaded(chunkX, chunkZ);
  
-                 PlatformHooks.get().onChunkWatch(this.world, chunk, this.player);
-+                // Canvas start - native LOD chunks - promote without a second terrain packet
-+                // the client already holds this terrain, re-sending it would rebuild the mesh for nothing.
-+                // a truncated column falls through, it really is missing blocks
-+                if (lodState == LOD_STATE_REAL
-+                    || (lodState == LOD_STATE_DISK && (
-+                        !io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.enabled(this.world)
-+                            || io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.hideBelowY(this.player)
-+                                != io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF
-+                    ))) {
-+                    this.completeLodPromotion(chunk);
-+                    return;
-+                }
-+                // Canvas end - native LOD chunks
-                 PlayerChunkSender.sendChunk(this.player.connection, this.world, chunk);
-                 return;
-             }
-             throw new IllegalStateException();
+@@ -446,24 +_,56 @@
          }
  
-+        // Canvas start - native LOD chunks
-+        // sends only what an LOD column could not carry: live light and block entities
-+        private void completeLodPromotion(final LevelChunk chunk) {
-+            this.player.connection.send(new net.minecraft.network.protocol.game.ClientboundLightUpdatePacket(
-+                chunk.getPos(), this.world.getLightEngine(), null, null
-+            ));
-+
-+            for (final net.minecraft.world.level.block.entity.BlockEntity blockEntity : chunk.canvas$getAllBlockEntities()) {
-+                final Packet<?> update = blockEntity.getUpdatePacket();
-+                if (update != null) {
-+                    this.player.connection.send(update);
-+                }
-+            }
-+
-+            if (io.papermc.paper.event.packet.PlayerChunkLoadEvent.getHandlerList().getRegisteredListeners().length > 0) {
-+                new io.papermc.paper.event.packet.PlayerChunkLoadEvent(new org.bukkit.craftbukkit.CraftChunk(chunk), this.player.getBukkitEntity()).callEvent();
-+            }
-+            this.world.debugSynchronizers().startTrackingChunk(this.player, chunk.getPos());
-+        }
-+        // Canvas end - native LOD chunks
-+
          private void sendUnloadChunk(final int chunkX, final int chunkZ) {
-+            // Canvas start - native LOD chunks
-+            // the send ring dropped this long ago, only the client still holds it
-+            final long lodKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+            final byte lodState = this.lodChunks.remove(lodKey);
-+            this.releaseLodCache(lodKey, lodState);
-+            this.antiFreecamCut.remove(lodKey);
-+            this.antiFreecamResend.remove(lodKey);
-             if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
-+                if (lodState != LOD_STATE_NONE && lodState != LOD_STATE_MISSING) {
-+                    // already unwatched when it was demoted, so only the client needs telling
-+                    this.sendForgetChunk(chunkX, chunkZ);
-+                }
-                 return;
-             }
-+            // Canvas end - native LOD chunks
-             this.sendUnloadChunkRaw(chunkX, chunkZ);
-         }
- 
--        private void sendUnloadChunkRaw(final int chunkX, final int chunkZ) {
+-            if (!this.sentChunks.remove(CoordinateUtils.getChunkKey(chunkX, chunkZ))) {
+-                return;
+-            }
+-            this.sendUnloadChunkRaw(chunkX, chunkZ);
+-        }
++            final long chunkKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
++            final boolean wasSent = this.sentChunks.remove(chunkKey);
++            final boolean wasFake = wasSent && this.fakeChunks.remove(chunkKey);
++            if (wasFake) {
++                this.world.extendedViewDistance().cache.unwatch(chunkKey);
++            }
++            final boolean skipRaw = wasSent ? wasFake : this.pendingForget.remove(chunkKey);
++            if (wasSent && !skipRaw) {
++                this.sendUnloadChunkRaw(chunkX, chunkZ, false);
++            } else if (skipRaw) {
++                this.sendForgetChunk(chunkX, chunkZ);
++            }
++        }
++
 +        // Canvas start - native LOD chunks
 +        // drops the server side watch without telling the client. the holder can be gone already, LOD keeps
 +        // columns on the client far outside any ticket
 +        private void unwatchChunk(final int chunkX, final int chunkZ) {
-             PlatformHooks.get().onChunkUnWatch(this.world, new ChunkPos(chunkX, chunkZ), this.player);
++            PlatformHooks.get().onChunkUnWatch(this.world, new ChunkPos(chunkX, chunkZ), this.player);
 +            final ca.spottedleaf.moonrise.patches.chunk_system.scheduling.NewChunkHolder holder = ((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
 +                .getChunkHolder(chunkX, chunkZ);
 +            if (holder != null) {
@@ -138,105 +100,111 @@
 +            this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
 +        }
 +        // Canvas end - native LOD chunks
+ 
+         private void sendUnloadChunkRaw(final int chunkX, final int chunkZ) {
+-            PlatformHooks.get().onChunkUnWatch(this.world, new ChunkPos(chunkX, chunkZ), this.player);
++            this.sendUnloadChunkRaw(chunkX, chunkZ, false);
++        }
 +
-+        private void sendUnloadChunkRaw(final int chunkX, final int chunkZ) {
-+            this.unwatchChunk(chunkX, chunkZ); // Canvas - native LOD chunks - tolerate a missing holder
++        private void sendUnloadChunkRaw(final int chunkX, final int chunkZ, final boolean keepClient) {
++            this.unwatchChunk(chunkX, chunkZ);
              // Note: Check PlayerChunkSender#dropChunk for other logic
              // Note: drop isAlive() check so that chunks properly unload client-side when the player dies
 -            ((ChunkSystemChunkHolder)((ChunkSystemServerLevel)this.world).moonrise$getChunkTaskScheduler().chunkHolderManager
 -                .getChunkHolder(chunkX, chunkZ).vanillaChunkHolder).moonrise$removeReceivedChunk(this.player);
-             this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
+-            this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
++            if (!keepClient) {
++                this.player.connection.send(new ClientboundForgetLevelChunkPacket(new ChunkPos(chunkX, chunkZ)));
++            }
              // Paper start - PlayerChunkUnloadEvent
              if (io.papermc.paper.event.packet.PlayerChunkUnloadEvent.getHandlerList().getRegisteredListeners().length > 0) {
-@@ -466,6 +_,47 @@
+                 new io.papermc.paper.event.packet.PlayerChunkUnloadEvent(player.getBukkitEntity().getWorld().getChunkAt(new ChunkPos(chunkX, chunkZ).longKey()), player.getBukkitEntity()).callEvent();
+             }
              // Paper end - PlayerChunkUnloadEvent
++            if (keepClient) {
++                this.pendingForget.add(CoordinateUtils.getChunkKey(chunkX, chunkZ));
++            }
          }
  
-+        // Canvas start - native LOD chunks
-+        // broadcastMap now spans the LOD ring, so the demote needs its own map at the radius where a holder exists
-+        private void demoteChunk(final int chunkX, final int chunkZ) {
-+            final long chunk = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+            if (!this.sentChunks.remove(chunk)) {
-+                return;
-+            }
-+
-+            this.antiFreecamResend.remove(chunk);
-+            this.unwatchChunk(chunkX, chunkZ);
-+
-+            if (this.lastLodDistance > 0 && this.inLodRing(chunkX, chunkZ)) {
-+                // the client keeps the real terrain it already has, no forget and no LOD overwrite
-+                if (this.antiFreecamCut.remove(chunk)) {
-+                    this.lodChunks.put(chunk, LOD_STATE_TRUNCATED);
-+                } else {
-+                    this.lodChunks.put(chunk, LOD_STATE_REAL);
-+                }
-+                this.antiFreecamResend.remove(chunk);
-+                return;
-+            }
-+
-+            this.sendForgetChunk(chunkX, chunkZ);
-+            if (io.papermc.paper.event.packet.PlayerChunkUnloadEvent.getHandlerList().getRegisteredListeners().length > 0) {
-+                new io.papermc.paper.event.packet.PlayerChunkUnloadEvent(this.player.getBukkitEntity().getWorld().getChunkAt(new ChunkPos(chunkX, chunkZ).longKey()), this.player.getBukkitEntity()).callEvent();
-+            }
+         private final SingleUserAreaMap<PlayerChunkLoaderData> broadcastMap = new SingleUserAreaMap<>(this) {
+@@ -631,6 +_,14 @@
+             final int dz = this.lastChunkZ - chunkZ;
+             return (Math.max(Math.abs(dx), Math.abs(dz)) <= (this.lastSendDistance + 1)) && wantChunkLoaded(
+                 this.lastChunkX, this.lastChunkZ, chunkX, chunkZ, this.lastSendDistance
++            );
 +        }
 +
-+        private final SingleUserAreaMap<PlayerChunkLoaderData> sendMap = new SingleUserAreaMap<>(this) {
-+            @Override
-+            protected void addCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
-+                // do nothing, we only care about remove
-+            }
-+
-+            @Override
-+            protected void removeCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
-+                parameter.demoteChunk(chunkX, chunkZ);
-+            }
-+        };
-+        // Canvas end - native LOD chunks
-+
-         private final SingleUserAreaMap<PlayerChunkLoaderData> broadcastMap = new SingleUserAreaMap<>(this) {
-             @Override
-             protected void addCallback(final PlayerChunkLoaderData parameter, final int chunkX, final int chunkZ) {
-@@ -866,6 +_,9 @@
-                 }
-             }
- 
-+            this.tickLod(); // Canvas - native LOD chunks
-+            this.tickAntiFreecam();
-+
-             this.flushDelayedTicketOps();
++        private boolean wantChunkInVVRange(final int chunkX, final int chunkZ) {
++            final int dx = this.lastChunkX - chunkX;
++            final int dz = this.lastChunkZ - chunkZ;
++            return (Math.max(Math.abs(dx), Math.abs(dz)) <= (this.lastVVDistance + 1)) && wantChunkLoaded(
++                this.lastChunkX, this.lastChunkZ, chunkX, chunkZ, this.lastVVDistance
+             );
          }
  
-@@ -894,6 +_,7 @@
+@@ -839,9 +_,15 @@
+             final long maxSendsThisTick = this.chunkSendLimiter.takeAllocation(maxSends);
+             // we do not return sends that we took from the allocation back because we want to limit the max send rate, not target it
+             for (long i = 0; i < maxSendsThisTick; ++i) {
++                if (this.sendQueue.isEmpty()) {
++                    break;
++                }
+                 final long pendingSend = this.sendQueue.firstLong();
+                 final int pendingSendX = CoordinateUtils.getChunkX(pendingSend);
+                 final int pendingSendZ = CoordinateUtils.getChunkZ(pendingSend);
++                if (!this.wantChunkSent(pendingSendX, pendingSendZ)) {
++                    break;
++                }
+                 final LevelChunk chunk = ((ChunkSystemLevel)this.world).moonrise$getFullChunkIfLoaded(pendingSendX, pendingSendZ);
+                 if (!this.areNeighboursGenerated(pendingSendX, pendingSendZ, 1) || !TickThread.isTickThreadFor(this.world, pendingSendX, pendingSendZ)) {
+                     // nothing to do
+@@ -865,6 +_,8 @@
+                     return;
+                 }
+             }
++
++            this.tickExtendedView(maxSendsThisTick);
+ 
+             this.flushDelayedTicketOps();
+         }
+@@ -888,13 +_,15 @@
+             // send view cannot be greater-than load view
+             final int clientViewDistance = getClientViewDistance(this.player);
+             final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
++            final io.canvasmc.canvas.chunk.lod.LodSettings addLodSettings = io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance().resolve(this.player);
++            final int advertisedRadius = getVisualViewDistance(sendViewDistance, addLodSettings.viewDistance());
+ 
+             // send view distances
+-            this.player.connection.send(this.updateClientChunkRadius(sendViewDistance));
++            this.player.connection.send(this.updateClientChunkRadius(advertisedRadius));
              this.player.connection.send(this.updateClientSimulationDistance(tickViewDistance));
  
              // add to distance maps
-+            this.sendMap.add(chunkX, chunkZ, sendViewDistance + 1); // Canvas - native LOD chunks
-             this.broadcastMap.add(chunkX, chunkZ, sendViewDistance + 1);
+-            this.broadcastMap.add(chunkX, chunkZ, sendViewDistance + 1);
++            this.broadcastMap.add(chunkX, chunkZ, advertisedRadius + 1);
              this.loadTicketCleanup.add(chunkX, chunkZ, loadViewDistance + 1);
              this.tickMap.add(chunkX, chunkZ, tickViewDistance);
-@@ -936,6 +_,14 @@
+ 
+@@ -936,6 +_,12 @@
              final int clientViewDistance = getClientViewDistance(this.player);
              final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
  
-+            // Canvas start - native LOD chunks
++            // Canvas start - extended view distance
 +            final io.canvasmc.canvas.chunk.lod.LodSettings lodSettings = io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance().resolve(this.player);
-+            final int lodCutoffY = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.alignCutoff(lodSettings.cutoffY());
-+            final int lodViewDistance = capLodViewDistance(lodSettings.viewDistance(), sendViewDistance, clientViewDistance);
-+            final int advertisedRadius = Math.max(sendViewDistance, lodViewDistance);
++            final int advertisedRadius = getVisualViewDistance(sendViewDistance, lodSettings.viewDistance());
 +            final boolean lodRefresh = this.lodRefreshRequested;
-+            // Canvas end - native LOD chunks
++            // Canvas end - extended view distance
 +
              final ChunkPos playerPos = this.player.chunkPosition();
              final boolean canGenerateChunks = this.canPlayerGenerateChunks();
              final int currentChunkX = playerPos.x();
-@@ -956,13 +_,36 @@
+@@ -956,13 +_,28 @@
  
                      // can we still generate chunks?
                      && this.canGenerateChunks == canGenerateChunks
 +
 +                    // Canvas start - native LOD chunks
-+                    && lodViewDistance == this.lastLodDistance
-+                    && lodCutoffY == this.lastLodCutoffY
++                    && advertisedRadius == this.lastVVDistance
 +                    && !lodRefresh
 +                    // Canvas end - native LOD chunks
              ) {
@@ -244,25 +212,18 @@
                  return;
              }
  
-+            this.lodRefreshRequested = false; // Canvas - native LOD chunks
++            this.lodRefreshRequested = false;
 +
-+            // Canvas start - native LOD chunks
-+            // the demote callback below reads these, so they have to be current before any map update fires
 +            this.lastChunkX = currentChunkX;
 +            this.lastChunkZ = currentChunkZ;
 +            this.lastSendDistance = sendViewDistance;
 +            this.lastLoadDistance = loadViewDistance;
 +            this.lastTickDistance = tickViewDistance;
 +            this.canGenerateChunks = canGenerateChunks;
-+            this.lastLodDistance = lodViewDistance;
-+            this.lastLodCutoffY = lodCutoffY;
-+            // Canvas end - native LOD chunks
++            this.lastVVDistance = advertisedRadius;
 +
              // update distance maps
 -            this.broadcastMap.update(currentChunkX, currentChunkZ, sendViewDistance + 1);
-+            // Canvas - native LOD chunks - demote at the real send radius, where a chunk holder still exists
-+            this.sendMap.update(currentChunkX, currentChunkZ, sendViewDistance + 1);
-+            // Canvas - native LOD chunks - the broadcast map drives forget packets, so it must cover the LOD ring too
 +            this.broadcastMap.update(currentChunkX, currentChunkZ, advertisedRadius + 1);
              this.loadTicketCleanup.update(currentChunkX, currentChunkZ, loadViewDistance + 1);
              this.tickMap.update(currentChunkX, currentChunkZ, tickViewDistance);
@@ -278,276 +239,178 @@
              }
              if (this.lastSentSimulationDistance != tickViewDistance) {
                  this.player.connection.send(this.updateClientSimulationDistance(tickViewDistance));
-@@ -984,13 +_,8 @@
+@@ -984,16 +_,10 @@
              this.genQueue.clear();
              this.loadingQueue.clear();
              this.loadQueue.clear();
-+            this.lodQueue.clear(); // Canvas - native LOD chunks - lodChunks is client state and must survive this
- 
+-
 -            this.lastChunkX = currentChunkX;
 -            this.lastChunkZ = currentChunkZ;
 -            this.lastSendDistance = sendViewDistance;
 -            this.lastLoadDistance = loadViewDistance;
 -            this.lastTickDistance = tickViewDistance;
 -            this.canGenerateChunks = canGenerateChunks;
+-
+-            // +1 since we need to load chunks +1 around the load view distance...
+-            final long[] toIterate = ParallelSearchRadiusIteration.getEuclideanIteration(loadViewDistance + 1);
++            this.vvBuildQueue.clear();
++            this.vvBuildingQueue.clear();
++
++            final long[] toIterate = ParallelSearchRadiusIteration.getEuclideanIteration(advertisedRadius + 1);
+             // the iteration order is by increasing manhattan distance - so, we do NOT need to
+             // sort anything in the queue!
+             for (final long deltaChunk : toIterate) {
+@@ -1005,24 +_,38 @@
+                 final int squareDistance = Math.max(Math.abs(dx), Math.abs(dz));
+                 final int manhattanDistance = Math.abs(dx) + Math.abs(dz);
  
-             // +1 since we need to load chunks +1 around the load view distance...
-             final long[] toIterate = ParallelSearchRadiusIteration.getEuclideanIteration(loadViewDistance + 1);
-@@ -1014,9 +_,17 @@
-                 final boolean sentChunk = sendChunk ? this.sentChunks.contains(chunk) : this.sentChunks.remove(chunk);
- 
-                 if (!sendChunk && sentChunk) {
-+                    // Canvas start - native LOD chunks
-+                    // inside the LOD ring the client keeps the real terrain it has, better than a disk column
-+                    if (lodViewDistance > 0 && this.inLodRing(chunkX, chunkZ)) {
-+                        this.unwatchChunk(chunkX, chunkZ);
-+                        this.lodChunks.put(chunk, LOD_STATE_REAL);
+-                // since chunk sending is not by radius alone, we need an extra check here to account for
+-                // everything <= sendDistance
+-                // Note: Vanilla may want to send chunks outside the send view distance, so we do need
+-                // the dist <= view check
++                final boolean inLoad = squareDistance <= (loadViewDistance + 1);
+                 final boolean sendChunk = (squareDistance <= (sendViewDistance + 1))
+                     && wantChunkLoaded(currentChunkX, currentChunkZ, chunkX, chunkZ, sendViewDistance);
+-                final boolean sentChunk = sendChunk ? this.sentChunks.contains(chunk) : this.sentChunks.remove(chunk);
+-
+-                if (!sendChunk && sentChunk) {
+-                    // have sent the chunk, but don't want it anymore
+-                    // unload it now
+-                    this.sendUnloadChunkRaw(chunkX, chunkZ);
++                final boolean vvChunk = !sendChunk
++                    && squareDistance <= (advertisedRadius + 1)
++                    && wantChunkLoaded(currentChunkX, currentChunkZ, chunkX, chunkZ, advertisedRadius);
++                final boolean isFake = this.fakeChunks.contains(chunk);
++                final boolean keepSent = !sendChunk && this.sentChunks.contains(chunk) && (isFake ? vvChunk : inLoad);
++                boolean sentChunk = keepSent || (sendChunk ? this.sentChunks.contains(chunk) && !isFake : this.sentChunks.remove(chunk));
++
++                if (!sendChunk && !keepSent && sentChunk) {
++                    this.fakeChunks.remove(chunk);
++                    if (isFake) {
++                        this.world.extendedViewDistance().cache.unwatch(chunk);
++                        this.sendForgetChunk(chunkX, chunkZ);
 +                    } else {
-+                    // Canvas end - native LOD chunks
-                     // have sent the chunk, but don't want it anymore
-                     // unload it now
-                     this.sendUnloadChunkRaw(chunkX, chunkZ);
-+                    } // Canvas - native LOD chunks
++                        this.sendUnloadChunkRaw(chunkX, chunkZ, vvChunk);
++                    }
++                    sentChunk = false;
++                }
++
++                if (vvChunk && !sentChunk) {
++                    this.vvBuildQueue.enqueue(chunk);
++                }
++
++                if (!inLoad) {
++                    continue;
                  }
  
                  final byte stage = this.chunkTicketStage.get(chunk);
-@@ -1061,6 +_,28 @@
-                 }
-             }
- 
-+            // Canvas start - native LOD chunks
-+            if (lodViewDistance > 0) {
-+                for (final long deltaChunk : ParallelSearchRadiusIteration.getSearchIteration(lodViewDistance)) {
-+                    final int chunkX = CoordinateUtils.getChunkX(deltaChunk) + currentChunkX;
-+                    final int chunkZ = CoordinateUtils.getChunkZ(deltaChunk) + currentChunkZ;
-+
-+                    // the send view is round, so its square bound is not the boundary between the two rings
-+                    if (this.wantChunkSent(chunkX, chunkZ) || !wantChunkLoaded(currentChunkX, currentChunkZ, chunkX, chunkZ, lodViewDistance)) {
-+                        continue;
-+                    }
-+
-+                    final long chunk = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+                    if (this.lodChunks.get(chunk) != LOD_STATE_NONE || this.sentChunks.contains(chunk)
-+                        || this.lodInflight.contains(chunk) || this.lodReadyKeys.contains(chunk)) {
-+                        continue;
-+                    }
-+
-+                    this.lodQueue.enqueue(chunk);
-+                }
-+            }
-+            // Canvas end - native LOD chunks
-+
-             // update the chunk center
-             // this must be done last so that the client does not ignore any of our unload chunk packets above
-             if (this.lastSentChunkCenterX != currentChunkX || this.lastSentChunkCenterZ != currentChunkZ) {
-@@ -1076,6 +_,7 @@
-                 throw new IllegalStateException("Removing removed player chunk loader");
-             }
-             this.removed = true;
-+            this.sendMap.remove(); // Canvas - native LOD chunks
-             // sends the chunk unload packets
-             this.broadcastMap.remove();
-             // cleans up loading/generating tickets
-@@ -1083,6 +_,20 @@
+                 switch (stage) {
+                     case CHUNK_TICKET_STAGE_NONE: {
+-                        // we want the chunk to be at least loaded
+                         this.loadQueue.enqueue(chunk);
+                         break;
+                     }
+@@ -1083,6 +_,14 @@
              // cleans up ticking tickets
              this.tickMap.remove();
  
-+            // Canvas start - native LOD chunks
-+            this.lodQueue.clear();
-+            this.lodInflight.clear();
-+            this.lodResults.clear();
-+            this.lodReady.clear();
-+            this.lodReadyKeys.clear();
-+            for (final it.unimi.dsi.fastutil.longs.Long2ByteMap.Entry mapping : this.lodChunks.long2ByteEntrySet()) {
-+                this.releaseLodCache(mapping.getLongKey(), mapping.getByteValue());
++            this.vvBuildQueue.clear();
++            this.vvBuildingQueue.clear();
++            for (final LongIterator iterator = this.fakeChunks.iterator(); iterator.hasNext(); ) {
++                this.world.extendedViewDistance().cache.unwatch(iterator.nextLong());
 +            }
-+            this.lodChunks.clear();
-+            // Canvas end - native LOD chunks
-+            this.antiFreecamCut.clear();
-+            this.antiFreecamResend.clear();
++            this.fakeChunks.clear();
++            this.pendingForget.clear();
 +
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1095,6 +_,248 @@
-             this.flushDelayedTicketOps();
- 
+@@ -1097,6 +_,111 @@
              // now all tickets should be removed, which is all of our external state
-+        }
-+
-+        // Canvas start - native LOD chunks
-+        private static int capLodViewDistance(final int requested, final int sendViewDistance, final int clientViewDistance) {
+         }
+ 
++        // Canvas start - extended view distance
++        private static int getVisualViewDistance(final int sendViewDistance, final int requested) {
 +            if (requested <= 0) {
-+                return 0;
++                return sendViewDistance;
 +            }
-+
-+            int cap = MoonriseConstants.MAX_VIEW_DISTANCE;
-+            if (clientViewDistance >= 0) {
-+                cap = Math.min(cap, clientViewDistance);
-+            }
-+
-+            final int lod = Math.min(requested, cap);
-+            // there is nothing to do unless the LOD ring actually extends past the real one
-+            return lod > sendViewDistance ? lod : 0;
++            return Math.max(sendViewDistance, (int) Math.clamp((long) requested, 0, MoonriseConstants.MAX_VIEW_DISTANCE));
 +        }
 +
-+        private boolean wantLod(final long chunkKey) {
-+            if (this.lastLodDistance <= 0) {
-+                return false;
-+            }
-+
-+            final int chunkX = CoordinateUtils.getChunkX(chunkKey);
-+            final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
-+
-+            return !this.wantChunkSent(chunkX, chunkZ) && this.inLodRing(chunkX, chunkZ)
-+                && this.lodChunks.get(chunkKey) == LOD_STATE_NONE && !this.sentChunks.contains(chunkKey);
-+        }
-+
-+        // round for the same reason the send view is, a square ring's corners are columns the client never draws
-+        private boolean inLodRing(final int chunkX, final int chunkZ) {
-+            return Math.max(Math.abs(chunkX - this.lastChunkX), Math.abs(chunkZ - this.lastChunkZ)) <= this.lastLodDistance
-+                && wantChunkLoaded(this.lastChunkX, this.lastChunkZ, chunkX, chunkZ, this.lastLodDistance);
-+        }
-+
-+        private void tickLod() {
-+            if (this.lastLodDistance <= 0) {
-+                this.lodInflight.clear();
-+                this.lodResults.clear();
-+                this.lodReady.clear();
-+                this.lodReadyKeys.clear();
-+                return;
-+            }
-+
-+            this.drainLodResults();
-+
-+            // a full ready list used to stop encodes; while flying that pile is behind the player and the front stays empty
-+            this.trimLodReady();
-+            int budget = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_INFLIGHT_PER_PLAYER - this.lodInflight.size();
-+            while (budget > 0 && !this.lodQueue.isEmpty()) {
-+                final long chunkKey = this.lodQueue.dequeueLong();
-+                if (!this.wantLod(chunkKey) || this.lodReadyKeys.contains(chunkKey) || !this.lodInflight.add(chunkKey)) {
-+                    continue;
-+                }
-+                --budget;
-+                this.requestLod(chunkKey);
-+            }
-+            // cache hits are posted on this thread, so they can leave in the same tick
-+            this.drainLodResults();
-+        }
-+
-+        private void trimLodReady() {
-+            final int max = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_READY_PER_PLAYER;
-+            if (this.lodReady.size() <= max) {
-+                return;
-+            }
-+
-+            this.lodReady.sort(this.lodReadyOrder);
-+            for (int i = this.lodReady.size() - 1; i >= max; --i) {
-+                final LodResult extra = this.lodReady.remove(i);
-+                this.lodReadyKeys.remove(extra.chunkKey());
-+                if (this.wantLod(extra.chunkKey())) {
-+                    this.lodQueue.enqueue(extra.chunkKey());
-+                }
-+            }
-+        }
-+
-+        // never getChunk, never ticket, never generate - this only ever reads what is already on disk
-+        private void requestLod(final long chunkKey) {
-+            final int cutoffY = this.lastLodCutoffY;
-+            // a hollowed or truncated column is missing real blocks, so it cannot take the no-resend promote path
-+            final boolean hollow = io.canvasmc.canvas.chunk.lod.LodChunkEncoder.hollows(this.world);
-+            final boolean truncated = hollow || cutoffY > this.world.getMinY();
-+            this.world.canvasLodCache().request(
-+                this.world, chunkKey, cutoffY, hollow,
-+                io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendLight(this.world),
-+                io.canvasmc.canvas.chunk.lod.LodChunkEncoder.shouldSendBlockLight(this.world),
-+                (final io.canvasmc.canvas.chunk.lod.LodChunkCache.Result result) ->
-+                    this.lodResults.add(new LodResult(chunkKey, truncated, result.packet()))
-+            );
-+        }
-+
-+        private void drainLodResults() {
-+            LodResult result;
-+            while ((result = this.lodResults.poll()) != null) {
-+                this.lodInflight.remove(result.chunkKey());
-+                if (!this.wantLod(result.chunkKey())) {
-+                    continue;
-+                }
-+
-+                if (result.packet() == null) {
-+                    // nothing usable on disk, so the hole stays a hole until the column leaves the ring
-+                    this.lodChunks.put(result.chunkKey(), LOD_STATE_MISSING);
-+                    continue;
-+                }
-+
-+                if (this.lodReadyKeys.add(result.chunkKey())) {
-+                    this.lodReady.add(result);
-+                }
-+            }
-+
-+            if (this.lodReady.isEmpty()) {
-+                return;
-+            }
-+
-+            this.lodReady.sort(this.lodReadyOrder);
-+
-+            java.util.List<net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket> toSend = null;
-+            int kept = 0;
-+            final int size = this.lodReady.size();
-+            final int sendBudget = io.canvasmc.canvas.chunk.lod.LodChunkSystem.MAX_SENDS_PER_TICK;
-+            for (int i = 0; i < size; ++i) {
-+                final LodResult ready = this.lodReady.get(i);
-+                if (!this.wantLod(ready.chunkKey())) {
-+                    this.lodReadyKeys.remove(ready.chunkKey());
-+                    continue;
-+                }
-+                if ((toSend == null || toSend.size() < sendBudget) && this.clientHoldsNeighbor(ready.chunkKey())) {
-+                    this.lodReadyKeys.remove(ready.chunkKey());
-+                    this.lodChunks.put(ready.chunkKey(), ready.truncated() ? LOD_STATE_TRUNCATED : LOD_STATE_DISK);
-+                    this.world.canvasLodCache().watch(ready.chunkKey());
-+                    if (toSend == null) {
-+                        toSend = new java.util.ArrayList<>(sendBudget);
-+                    }
-+                    toSend.add(ready.packet());
-+                    continue;
-+                }
-+                this.lodReady.set(kept++, ready);
-+            }
-+            if (kept != size) {
-+                this.lodReady.subList(kept, size).clear();
-+            }
-+            if (toSend == null) {
-+                return;
-+            }
-+
-+            // one batch per player per tick, one batch per column would flood the client's acknowledgement packets
-+            this.player.connection.send(net.minecraft.network.protocol.game.ClientboundChunkBatchStartPacket.INSTANCE);
-+            for (int i = 0, len = toSend.size(); i < len; ++i) {
-+                this.player.connection.send(toSend.get(i));
-+            }
-+            this.player.connection.send(new net.minecraft.network.protocol.game.ClientboundChunkBatchFinishedPacket(toSend.size()));
-+        }
-+
-+        private long chunkDistanceSq(final long chunkKey) {
-+            final long dx = CoordinateUtils.getChunkX(chunkKey) - this.lastChunkX;
-+            final long dz = CoordinateUtils.getChunkZ(chunkKey) - this.lastChunkZ;
++        private static int squaredDistance(final int dx, final int dz) {
 +            return (dx * dx) + (dz * dz);
 +        }
 +
-+        private boolean clientHoldsNeighbor(final long chunkKey) {
-+            final int chunkX = CoordinateUtils.getChunkX(chunkKey);
-+            final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
-+            return this.clientHolds(chunkX - 1, chunkZ) || this.clientHolds(chunkX + 1, chunkZ)
-+                || this.clientHolds(chunkX, chunkZ - 1) || this.clientHolds(chunkX, chunkZ + 1);
-+        }
++        private void tickExtendedView(final long maxSendsThisTick) {
++            final ExtendedViewDistance extendedView = this.world.extendedViewDistance();
++            int nearestUnfinished = this.vvBuildQueue.isEmpty()
++                ? Integer.MAX_VALUE
++                : squaredDistance(
++                    CoordinateUtils.getChunkX(this.vvBuildQueue.firstLong()) - this.lastChunkX,
++                    CoordinateUtils.getChunkZ(this.vvBuildQueue.firstLong()) - this.lastChunkZ
++                );
 +
-+        private boolean clientHolds(final int chunkX, final int chunkZ) {
-+            final long key = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-+            if (this.sentChunks.contains(key)) {
-+                return true;
++            for (int i = 0, size = this.vvBuildingQueue.size(); i < size; ++i) {
++                final long chunkKey = this.vvBuildingQueue.getLong(i);
++                final int chunkX = CoordinateUtils.getChunkX(chunkKey);
++                final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
++                final Result result = extendedView.tryLoad(chunkX, chunkZ).getNow(null);
++                if (result == null || !result.isSuccess()) {
++                    nearestUnfinished = Math.min(nearestUnfinished, squaredDistance(chunkX - this.lastChunkX, chunkZ - this.lastChunkZ));
++                }
 +            }
-+            final byte state = this.lodChunks.get(key);
-+            return state == LOD_STATE_DISK || state == LOD_STATE_TRUNCATED || state == LOD_STATE_REAL;
++
++            for (final LongIterator iterator = this.vvBuildingQueue.iterator(); iterator.hasNext(); ) {
++                final long chunkKey = iterator.nextLong();
++                final int chunkX = CoordinateUtils.getChunkX(chunkKey);
++                final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
++                final CompletableFuture<Result> future = extendedView.tryLoad(chunkX, chunkZ);
++                if (!future.isDone()) {
++                    continue;
++                }
++                final Result result = future.getNow(null);
++                if (result == null || !result.isSuccess()) {
++                    if (this.pendingForget.remove(chunkKey)) {
++                        this.sendForgetChunk(chunkX, chunkZ);
++                    }
++                    iterator.remove();
++                    continue;
++                }
++                if (squaredDistance(chunkX - this.lastChunkX, chunkZ - this.lastChunkZ) <= nearestUnfinished) {
++                    this.sendQueue.enqueue(chunkKey);
++                    iterator.remove();
++                }
++            }
++
++            while (!this.vvBuildQueue.isEmpty()) {
++                final long chunkKey = this.vvBuildQueue.dequeueLong();
++                extendedView.tryLoad(CoordinateUtils.getChunkX(chunkKey), CoordinateUtils.getChunkZ(chunkKey));
++                this.vvBuildingQueue.add(chunkKey);
++            }
++
++            for (long i = 0; i < maxSendsThisTick && !this.sendQueue.isEmpty(); ++i) {
++                final long chunkKey = this.sendQueue.firstLong();
++                final int chunkX = CoordinateUtils.getChunkX(chunkKey);
++                final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
++                if (this.wantChunkSent(chunkX, chunkZ)) {
++                    break;
++                }
++
++                this.sendQueue.dequeueLong();
++                final Result result = extendedView.tryLoad(chunkX, chunkZ).getNow(null);
++                if (this.wantChunkInVVRange(chunkX, chunkZ) && !this.sentChunks.contains(chunkKey)) {
++                    if (result == null || !result.isSuccess()) {
++                        throw new IllegalStateException("fake chunk was unsuccessful but passed into send queue");
++                    }
++                    this.sentChunks.add(chunkKey);
++                    this.fakeChunks.add(chunkKey);
++                    extendedView.cache.watch(chunkKey);
++                    this.pendingForget.remove(chunkKey);
++                    this.player.connection.send(result.getPacketOrThrow());
++                } else if (result != null && result.isSuccess()) {
++                    extendedView.cache.evictIfUnwatched(chunkKey);
++                }
++            }
 +        }
 +
 +        public int canvas$getAdvertisedRadius() {
@@ -556,65 +419,21 @@
 +
 +        public boolean canvas$isLodChunk(final int chunkX, final int chunkZ) {
 +            TickThread.ensureTickThread(this.player, "Cannot read LOD chunk state async");
-+            final byte state = this.lodChunks.get(CoordinateUtils.getChunkKey(chunkX, chunkZ));
-+            return state == LOD_STATE_DISK || state == LOD_STATE_TRUNCATED;
++            return this.fakeChunks.contains(CoordinateUtils.getChunkKey(chunkX, chunkZ));
 +        }
 +
 +        public int canvas$getLodChunkCount() {
 +            TickThread.ensureTickThread(this.player, "Cannot read LOD chunk state async");
-+            return this.lodChunks.size();
++            return this.fakeChunks.size();
 +        }
 +
 +        public void canvas$requestLodRefresh() {
 +            this.lodRefreshRequested = true;
 +        }
++        // Canvas end - extended view distance
 +
-+        private void releaseLodCache(final long chunkKey, final byte state) {
-+            if (state == LOD_STATE_DISK || state == LOD_STATE_TRUNCATED) {
-+                this.world.canvasLodCache().unwatch(chunkKey);
-+            }
-+        }
-+        // Canvas end - native LOD chunks
 +
-+        public void canvas$noteAntiFreecam(final long chunkKey, final boolean cut) {
-+            if (cut) {
-+                this.antiFreecamCut.add(chunkKey);
-+            } else {
-+                this.antiFreecamCut.remove(chunkKey);
-+            }
-+        }
 +
-+        private void tickAntiFreecam() {
-+            final int hideY = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.hideBelowY(this.player);
-+            if (hideY != this.lastAntiFreecamHideY) {
-+                this.lastAntiFreecamHideY = hideY;
-+                this.antiFreecamResend.clear();
-+                if (hideY == io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.NO_CUTOFF) {
-+                    this.antiFreecamResend.addAll(this.antiFreecamCut);
-+                    this.antiFreecamCut.clear();
-+                } else {
-+                    this.antiFreecamResend.addAll(this.sentChunks);
-+                }
-+            }
-+            int budget = io.canvasmc.canvas.chunk.antifreecam.AntiFreecam.RESEND_PER_TICK;
-+            while (budget-- > 0 && !this.antiFreecamResend.isEmpty()) {
-+                final long chunkKey = this.antiFreecamResend.firstLong();
-+                if (!this.sentChunks.contains(chunkKey)) {
-+                    this.antiFreecamResend.removeFirstLong();
-+                    continue;
-+                }
-+                final int chunkX = CoordinateUtils.getChunkX(chunkKey);
-+                final int chunkZ = CoordinateUtils.getChunkZ(chunkKey);
-+                final LevelChunk chunk = ((ChunkSystemLevel) this.world).moonrise$getFullChunkIfLoaded(chunkX, chunkZ);
-+                if (chunk == null || !TickThread.isTickThreadFor(this.world, chunkX, chunkZ)) {
-+                    break;
-+                }
-+                this.antiFreecamResend.removeFirstLong();
-+                PlayerChunkSender.sendChunk(this.player.connection, this.world, chunk);
-+                if (this.removed) {
-+                    return;
-+                }
-+            }
-         }
- 
          public LongOpenHashSet getSentChunksRaw() {
+             return this.sentChunks;
+         }

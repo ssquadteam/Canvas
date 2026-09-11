@@ -4,13 +4,13 @@
      private static final AtomicInteger ENTITY_COUNTER = new AtomicInteger();
      private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<>(); // Folia - region threading
      private final ServerChunkCache chunkSource;
-+    // Canvas start - native LOD chunks
-+    private final io.canvasmc.canvas.chunk.lod.LodChunkCache canvasLodCache = new io.canvasmc.canvas.chunk.lod.LodChunkCache();
++    // Canvas start - extended view distance
++    private final io.canvasmc.canvas.extendedview.ExtendedViewDistance extendedViewDistance = new io.canvasmc.canvas.extendedview.ExtendedViewDistance(this);
 +
-+    public io.canvasmc.canvas.chunk.lod.LodChunkCache canvasLodCache() {
-+        return this.canvasLodCache;
++    public io.canvasmc.canvas.extendedview.ExtendedViewDistance extendedViewDistance() {
++        return this.extendedViewDistance;
 +    }
-+    // Canvas end - native LOD chunks
++    // Canvas end - extended view distance
      private final MinecraftServer server;
      public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
      // private final EntityTickList entityTickList = new EntityTickList(); // Folia - region threading
