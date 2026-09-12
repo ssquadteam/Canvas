@@ -72,7 +72,7 @@ public final class LodChunkSystem implements LodChunkService {
     // hot path, called by the chunk loader on the player's own region thread
     public LodSettings resolve(final ServerPlayer player) {
         final ServerLevel level = player.level();
-        if (!this.hasOverrides && level.canvasConfig().worldChunkSystem.lodViewDistance <= 0) {
+        if (!this.hasOverrides && !hasConfiguredView(level) && officialPlayerView(player) <= 0) {
             return LodSettings.DISABLED;
         }
 
@@ -82,6 +82,11 @@ public final class LodChunkSystem implements LodChunkService {
         final int playerView = this.playerViewDistances.getInt(id);
         if (playerView != UNSET) {
             settings = settings.withViewDistance(playerView);
+        } else {
+            final int officialPlayer = officialPlayerView(player);
+            if (officialPlayer > 0) {
+                settings = settings.withViewDistance(officialPlayer);
+            }
         }
         final int playerCutoff = this.playerCutoffs.getInt(id);
         if (playerCutoff != UNSET) {
@@ -92,10 +97,19 @@ public final class LodChunkSystem implements LodChunkService {
     }
 
     public LodSettings resolve(final ServerLevel level) {
-        if (!this.hasOverrides && level.canvasConfig().worldChunkSystem.lodViewDistance <= 0) {
+        if (!this.hasOverrides && !hasConfiguredView(level)) {
             return LodSettings.DISABLED;
         }
         return this.applyResolvers(null, level, this.baseSettings(level));
+    }
+
+    private static boolean hasConfiguredView(final ServerLevel level) {
+        return level.canvasConfig().worldChunkSystem.lodViewDistance > 0
+            || level.serverLevelData.canvas$distanceConfig.visualViewDistanceOrDefault() > 0;
+    }
+
+    private static int officialPlayerView(final ServerPlayer player) {
+        return ((ChunkSystemServerPlayer) player).moonrise$getViewDistanceHolder().getViewDistances().vvDistance();
     }
 
     private void updateOverrideFlag() {
@@ -110,7 +124,8 @@ public final class LodChunkSystem implements LodChunkService {
 
     private LodSettings baseSettings(final ServerLevel level) {
         final WorldConfig.WorldChunkSystem config = level.canvasConfig().worldChunkSystem;
-        int viewDistance = config.lodViewDistance;
+        final int official = level.serverLevelData.canvas$distanceConfig.visualViewDistanceOrDefault();
+        int viewDistance = official > 0 ? official : config.lodViewDistance;
         int cutoffY = config.lodCutoffY;
 
         final int serverView = this.serverViewDistance;
@@ -176,8 +191,10 @@ public final class LodChunkSystem implements LodChunkService {
 
     @Override
     public LodSettings configuredSettings(final World world) {
-        final WorldConfig.WorldChunkSystem config = level(world).canvasConfig().worldChunkSystem;
-        return new LodSettings(Math.max(0, config.lodViewDistance), config.lodCutoffY);
+        final ServerLevel handle = level(world);
+        final WorldConfig.WorldChunkSystem config = handle.canvasConfig().worldChunkSystem;
+        final int official = handle.serverLevelData.canvas$distanceConfig.visualViewDistanceOrDefault();
+        return new LodSettings(Math.max(0, official > 0 ? official : config.lodViewDistance), config.lodCutoffY);
     }
 
     @Override
@@ -193,6 +210,7 @@ public final class LodChunkSystem implements LodChunkService {
     @Override
     public void setServerViewDistance(final int viewDistance) {
         this.serverViewDistance = checkViewDistance(viewDistance);
+        io.canvasmc.canvas.GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.vvDistance = this.serverViewDistance;
         this.refreshAll();
     }
 
@@ -233,13 +251,19 @@ public final class LodChunkSystem implements LodChunkService {
 
     @Override
     public void setWorldViewDistance(final World world, final int viewDistance) {
-        this.worldViewDistances.put(level(world).dimension(), checkViewDistance(viewDistance));
+        final ServerLevel handle = level(world);
+        this.worldViewDistances.put(handle.dimension(), checkViewDistance(viewDistance));
+        handle.serverLevelData.canvas$distanceConfig.setVisualViewDistance(viewDistance);
+        handle.moonrise$getPlayerChunkLoader().setVisualViewDistance(viewDistance);
         this.refresh(world);
     }
 
     @Override
     public void clearWorldViewDistance(final World world) {
-        this.worldViewDistances.removeInt(level(world).dimension());
+        final ServerLevel handle = level(world);
+        this.worldViewDistances.removeInt(handle.dimension());
+        handle.serverLevelData.canvas$distanceConfig.setVisualViewDistance(-1);
+        handle.moonrise$getPlayerChunkLoader().setVisualViewDistance(-1);
         this.refresh(world);
     }
 
@@ -276,12 +300,20 @@ public final class LodChunkSystem implements LodChunkService {
     @Override
     public void setPlayerViewDistance(final Player player, final int viewDistance) {
         this.playerViewDistances.put(player.getUniqueId(), checkViewDistance(viewDistance));
+        final ServerPlayer handle = handle(player);
+        if (handle != null) {
+            ((ChunkSystemServerPlayer) handle).moonrise$getViewDistanceHolder().setVisualViewDistance(viewDistance);
+        }
         this.refresh(player);
     }
 
     @Override
     public void clearPlayerViewDistance(final Player player) {
         this.playerViewDistances.removeInt(player.getUniqueId());
+        final ServerPlayer handle = handle(player);
+        if (handle != null) {
+            ((ChunkSystemServerPlayer) handle).moonrise$getViewDistanceHolder().setVisualViewDistance(-1);
+        }
         this.refresh(player);
     }
 

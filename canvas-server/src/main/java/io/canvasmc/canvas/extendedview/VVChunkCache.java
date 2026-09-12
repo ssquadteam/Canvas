@@ -3,18 +3,21 @@ package io.canvasmc.canvas.extendedview;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Supplier;
+import java.util.function.LongFunction;
 
 public final class VVChunkCache {
     private final ConcurrentHashMap<Long, CompletableFuture<Result>> cache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<Long, AtomicInteger> watchers = new ConcurrentHashMap<>();
 
-    public CompletableFuture<Result> computeIfAbsent(final long chunkKey, final Supplier<CompletableFuture<Result>> mapping) {
-        return this.cache.computeIfAbsent(chunkKey, ignored -> mapping.get());
+    public CompletableFuture<Result> computeIfAbsent(
+        final long chunkKey,
+        final LongFunction<? extends CompletableFuture<Result>> builder
+    ) {
+        return this.cache.computeIfAbsent(chunkKey, builder::apply);
     }
 
-    public void remove(final long chunkKey, final CompletableFuture<Result> future) {
-        this.cache.remove(chunkKey, future);
+    public void remove(final long chunkKey, final CompletableFuture<Result> expect) {
+        this.cache.remove(chunkKey, expect);
     }
 
     public void watch(final long chunkKey) {

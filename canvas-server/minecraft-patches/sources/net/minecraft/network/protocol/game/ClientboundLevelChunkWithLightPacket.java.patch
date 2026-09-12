@@ -1,6 +1,6 @@
 --- a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
 +++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
-@@ -57,6 +_,21 @@
+@@ -57,6 +_,20 @@
          levelChunk.getLevel().chunkPacketBlockController.modifyBlocks(this, chunkPacketInfo); // Paper - Anti-Xray - Modify blocks
      }
  
@@ -15,7 +15,6 @@
 +        this.z = z;
 +        this.chunkData = chunkData;
 +        this.lightData = lightData;
-+        this.ready = true;
 +    }
 +    // Canvas end - extended view distance
 +

@@ -5,7 +5,7 @@
      private final List<ServerPlayer> players = new java.util.concurrent.CopyOnWriteArrayList<>(); // Folia - region threading
      private final ServerChunkCache chunkSource;
 +    // Canvas start - extended view distance
-+    private final io.canvasmc.canvas.extendedview.ExtendedViewDistance extendedViewDistance = new io.canvasmc.canvas.extendedview.ExtendedViewDistance(this);
++    private final io.canvasmc.canvas.extendedview.ExtendedViewDistance extendedViewDistance;
 +
 +    public io.canvasmc.canvas.extendedview.ExtendedViewDistance extendedViewDistance() {
 +        return this.extendedViewDistance;
@@ -14,17 +14,21 @@
      private final MinecraftServer server;
      public final io.papermc.paper.world.saveddata.PaperLevelOverrides serverLevelData; // Paper - type
      // private final EntityTickList entityTickList = new EntityTickList(); // Folia - region threading
-@@ -707,6 +_,13 @@
+@@ -707,6 +_,17 @@
          // Paper end - rewrite chunk system
          this.getCraftServer().addWorld(this.getWorld()); // CraftBukkit
          this.updateTickData(); // Folia - region threading - make sure it is initialised before ticked
 +        // Canvas start - per world distance
-+        int viewDistance = this.serverLevelData.canvas$distanceConfig.viewDistanceOrDefault();
++        final int viewDistance = this.serverLevelData.canvas$distanceConfig.viewDistanceOrDefault();
 +        this.chunkSource.setViewDistance(viewDistance);
 +
-+        int simulationDistance = this.serverLevelData.canvas$distanceConfig.simulationDistanceOrDefault();
++        final int simulationDistance = this.serverLevelData.canvas$distanceConfig.simulationDistanceOrDefault();
 +        this.chunkSource.setSimulationDistance(simulationDistance);
++
++        final int visualViewDistance = this.serverLevelData.canvas$distanceConfig.visualViewDistanceOrDefault();
++        this.moonrise$getPlayerChunkLoader().setVisualViewDistance(visualViewDistance);
 +        // Canvas end - per world distance
++        this.extendedViewDistance = new io.canvasmc.canvas.extendedview.ExtendedViewDistance(this); // Canvas - extended view distance
      }
  
      // Folia start - region threading

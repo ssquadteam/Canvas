@@ -25,14 +25,15 @@
  
          private static void initCaches(final VoxelShape shape, final boolean neighbours) {
              ((ca.spottedleaf.moonrise.patches.collisions.shape.CollisionVoxelShape)shape).moonrise$isFullBlock();
-@@ -802,6 +_,12 @@
+@@ -802,6 +_,13 @@
          public final boolean canOcclude() { // Paper - Perf: Final for inlining
              return this.canOcclude;
          }
 +
 +        // Canvas start - extended view distance
-+        public boolean isSeeThrough() {
-+            return !this.canOcclude();
++        // air is see through, non-occluding blocks are see through, and SOME fluids too
++        public final boolean isSeeThrough() {
++            return this.isAir || !this.canOcclude || !this.getFluidState().isEmpty();
 +        }
 +        // Canvas end - extended view distance
  

@@ -2,7 +2,7 @@ package io.canvasmc.canvas.extendedview;
 
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 
-public sealed interface Result permits Result.Success, Result.NotGenerated, Result.Failure {
+public sealed interface Result {
     boolean isFailure();
 
     boolean isNotGenerated();
@@ -11,10 +11,10 @@ public sealed interface Result permits Result.Success, Result.NotGenerated, Resu
 
     ClientboundLevelChunkWithLightPacket getPacketOrThrow();
 
-    record Failure(Throwable cause) implements Result {
+    record Success(ClientboundLevelChunkWithLightPacket packet) implements Result {
         @Override
         public boolean isFailure() {
-            return true;
+            return false;
         }
 
         @Override
@@ -24,12 +24,12 @@ public sealed interface Result permits Result.Success, Result.NotGenerated, Resu
 
         @Override
         public boolean isSuccess() {
-            return false;
+            return true;
         }
 
         @Override
         public ClientboundLevelChunkWithLightPacket getPacketOrThrow() {
-            throw new IllegalStateException("Chunk failed to load", this.cause);
+            return this.packet;
         }
     }
 
@@ -57,10 +57,10 @@ public sealed interface Result permits Result.Success, Result.NotGenerated, Resu
         }
     }
 
-    record Success(ClientboundLevelChunkWithLightPacket packet) implements Result {
+    record Failure(Throwable cause) implements Result {
         @Override
         public boolean isFailure() {
-            return false;
+            return true;
         }
 
         @Override
@@ -70,12 +70,12 @@ public sealed interface Result permits Result.Success, Result.NotGenerated, Resu
 
         @Override
         public boolean isSuccess() {
-            return true;
+            return false;
         }
 
         @Override
         public ClientboundLevelChunkWithLightPacket getPacketOrThrow() {
-            return this.packet;
+            throw new IllegalStateException("Chunk failed to load", this.cause);
         }
     }
 }

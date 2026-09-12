@@ -17,3 +17,23 @@
  
      public boolean canSeePlayer(UUID uuid) {
          org.bukkit.entity.Entity entity = this.getServer().getPlayer(uuid);
+@@ -3227,6 +_,18 @@
+     public void setSendViewDistance(final int viewDistance) {
+         FeatureHooks.setSendViewDistance(this.getHandle(), viewDistance); // Paper - chunk system
+     }
++    // Canvas start - extended view distance
++
++    @Override
++    public int getVisualViewDistance() {
++        return ca.spottedleaf.moonrise.patches.chunk_system.player.RegionizedPlayerChunkLoader.getAPIVisualViewDistance(getHandle());
++    }
++
++    @Override
++    public void setVisualViewDistance(final int viewDistance) {
++        getHandle().moonrise$getViewDistanceHolder().setVisualViewDistance(viewDistance);
++    }
++    // Canvas end - extended view distance
+ 
+     // Paper start - entity effect API
+     @Override
+

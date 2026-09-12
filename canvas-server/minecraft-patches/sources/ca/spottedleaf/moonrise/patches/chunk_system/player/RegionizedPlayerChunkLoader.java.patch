@@ -12,6 +12,104 @@
  import net.minecraft.network.protocol.Packet;
  import net.minecraft.network.protocol.game.ClientboundForgetLevelChunkPacket;
  import net.minecraft.network.protocol.game.ClientboundSetChunkCacheCenterPacket;
+@@ -63,7 +_,7 @@
+         private static final VarHandle VIEW_DISTANCES_HANDLE = ConcurrentUtil.getVarHandle(ViewDistanceHolder.class, "viewDistances", ViewDistances.class);
+ 
+         public ViewDistanceHolder() {
+-            VIEW_DISTANCES_HANDLE.setVolatile(this, new ViewDistances(-1, -1, -1));
++            VIEW_DISTANCES_HANDLE.setVolatile(this, new ViewDistances(-1, -1, -1, -1)); // Canvas - extended view distance
+         }
+ 
+         public ViewDistances getViewDistances() {
+@@ -105,6 +_,14 @@
+                 return param.setSendViewDistance(distance);
+             });
+         }
++        // Canvas start - extended view distance
++
++        public void setVisualViewDistance(final int distance) {
++            this.updateViewDistance((final ViewDistances param) -> {
++                return param.setVisualViewDistance(distance);
++            });
++        }
++        // Canvas end - extended view distance
+ 
+         public JsonObject toJson() {
+             return this.getViewDistances().toJson();
+@@ -114,13 +_,16 @@
+     public static final record ViewDistances(
+         int tickViewDistance,
+         int loadViewDistance,
+-        int sendViewDistance
++        // Canvas start - extended view distance
++        int sendViewDistance,
++        int vvDistance
++        // Canvas end - extended view distance
+     ) {
+         public ViewDistances setTickViewDistance(final int distance) {
+             if (distance != -1 && (distance < (0) || distance > (MoonriseConstants.MAX_VIEW_DISTANCE))) {
+                 throw new IllegalArgumentException(Integer.toString(distance));
+             }
+-            return new ViewDistances(distance, this.loadViewDistance, this.sendViewDistance);
++            return new ViewDistances(distance, this.loadViewDistance, this.sendViewDistance, this.vvDistance); // Canvas - extended view distance
+         }
+ 
+         public ViewDistances setLoadViewDistance(final int distance) {
+@@ -128,7 +_,7 @@
+             if (distance != -1 && (distance < (2 + 1) || distance > (MoonriseConstants.MAX_VIEW_DISTANCE + 1))) {
+                 throw new IllegalArgumentException(Integer.toString(distance));
+             }
+-            return new ViewDistances(this.tickViewDistance, distance, this.sendViewDistance);
++            return new ViewDistances(this.tickViewDistance, distance, this.sendViewDistance, this.vvDistance); // Canvas - extended view distance
+         }
+ 
+         public ViewDistances setSendViewDistance(final int distance) {
+@@ -136,8 +_,17 @@
+             if (distance != -1 && (distance < (0) || distance > (MoonriseConstants.MAX_VIEW_DISTANCE))) {
+                 throw new IllegalArgumentException(Integer.toString(distance));
+             }
+-            return new ViewDistances(this.tickViewDistance, this.loadViewDistance, distance);
+-        }
++            return new ViewDistances(this.tickViewDistance, this.loadViewDistance, distance, this.vvDistance); // Canvas - extended view distance
++        }
++        // Canvas start - extended view distance
++
++        public ViewDistances setVisualViewDistance(final int distance) {
++            if (distance != -1 && (distance < (0) || distance > (MoonriseConstants.MAX_VIEW_DISTANCE))) {
++                throw new IllegalArgumentException(Integer.toString(distance));
++            }
++            return new ViewDistances(this.tickViewDistance, this.loadViewDistance, this.sendViewDistance, distance);
++        }
++        // Canvas end - extended view distance
+ 
+         public JsonObject toJson() {
+             final JsonObject ret = new JsonObject();
+@@ -145,6 +_,7 @@
+             ret.addProperty("tick-view-distance", this.tickViewDistance);
+             ret.addProperty("load-view-distance", this.loadViewDistance);
+             ret.addProperty("send-view-distance", this.sendViewDistance);
++            ret.addProperty("visual-view-distance", this.vvDistance); // Canvas - extended view distance
+ 
+             return ret;
+         }
+@@ -177,6 +_,17 @@
+         }
+         return data.lastSendDistance;
+     }
++    // Canvas start - extended view distance
++
++    public static int getAPIVisualViewDistance(final ServerPlayer player) {
++        final ServerLevel level = player.level();
++        final PlayerChunkLoaderData data = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
++        if (data == null) {
++            return ((ChunkSystemServerLevel)level).moonrise$getPlayerChunkLoader().getAPIVisualViewDistance();
++        }
++        return data.lastVVDistance;
++    }
++    // Canvas end - extended view distance
+ 
+     private final ServerLevel world;
+ 
 @@ -218,7 +_,7 @@
          final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
  
@@ -21,6 +119,45 @@
          }
  
          loader.remove();
+@@ -236,6 +_,12 @@
+     public void setTickDistance(final int distance) {
+         ((ChunkSystemServerLevel)this.world).moonrise$getViewDistanceHolder().setTickViewDistance(distance);
+     }
++    // Canvas start - extended view distance
++
++    public void setVisualViewDistance(final int distance) {
++        ((ChunkSystemServerLevel)this.world).moonrise$getViewDistanceHolder().setVisualViewDistance(distance);
++    }
++    // Canvas end - extended view distance
+ 
+     // Note: follow the player chunk loader so everything stays consistent...
+     public int getAPITickDistance() {
+@@ -272,6 +_,25 @@
+ 
+         return sendViewDistance;
+     }
++    // Canvas start - extended view distance
++
++    public int getAPIVisualViewDistance() {
++        final ViewDistances distances = ((ChunkSystemServerLevel)this.world).moonrise$getViewDistanceHolder().getViewDistances();
++        final int tickViewDistance = PlayerChunkLoaderData.getTickDistance(
++            -1, distances.tickViewDistance,
++            -1, distances.loadViewDistance
++        );
++        final int loadDistance = PlayerChunkLoaderData.getLoadViewDistance(tickViewDistance, -1, distances.loadViewDistance);
++        final int sendViewDistance = PlayerChunkLoaderData.getSendViewDistance(
++            loadDistance, -1, -1, distances.sendViewDistance
++        );
++
++        final int serverVVD = io.canvasmc.canvas.GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.vvDistance;
++        final int worldVVD = distances.vvDistance;
++
++        return PlayerChunkLoaderData.getVisualViewDistance(sendViewDistance, -1, worldVVD, serverVVD);
++    }
++    // Canvas end - extended view distance
+ 
+     public boolean isChunkSent(final ServerPlayer player, final int chunkX, final int chunkZ, final boolean borderOnly) {
+         return borderOnly ? this.isChunkSentBorderOnly(player, chunkX, chunkZ) : this.isChunkSent(player, chunkX, chunkZ);
 @@ -306,7 +_,7 @@
      public void tick() {
          TickThread.ensureTickThread("Cannot tick player chunk loader async");
@@ -167,12 +304,17 @@
  
              this.flushDelayedTicketOps();
          }
-@@ -888,13 +_,15 @@
+@@ -888,13 +_,20 @@
              // send view cannot be greater-than load view
              final int clientViewDistance = getClientViewDistance(this.player);
              final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
 +            final io.canvasmc.canvas.chunk.lod.LodSettings addLodSettings = io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance().resolve(this.player);
-+            final int advertisedRadius = getVisualViewDistance(sendViewDistance, addLodSettings.viewDistance());
++            final int advertisedRadius = getVisualViewDistance(
++                sendViewDistance,
++                addLodSettings.viewDistance(),
++                playerDistances.vvDistance,
++                worldDistances.vvDistance
++            );
  
              // send view distances
 -            this.player.connection.send(this.updateClientChunkRadius(sendViewDistance));
@@ -185,13 +327,18 @@
              this.loadTicketCleanup.add(chunkX, chunkZ, loadViewDistance + 1);
              this.tickMap.add(chunkX, chunkZ, tickViewDistance);
  
-@@ -936,6 +_,12 @@
+@@ -936,6 +_,17 @@
              final int clientViewDistance = getClientViewDistance(this.player);
              final int sendViewDistance = getSendViewDistance(loadViewDistance, clientViewDistance, playerDistances.sendViewDistance, worldDistances.sendViewDistance);
  
 +            // Canvas start - extended view distance
 +            final io.canvasmc.canvas.chunk.lod.LodSettings lodSettings = io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance().resolve(this.player);
-+            final int advertisedRadius = getVisualViewDistance(sendViewDistance, lodSettings.viewDistance());
++            final int advertisedRadius = getVisualViewDistance(
++                sendViewDistance,
++                lodSettings.viewDistance(),
++                playerDistances.vvDistance,
++                worldDistances.vvDistance
++            );
 +            final boolean lodRefresh = this.lodRefreshRequested;
 +            // Canvas end - extended view distance
 +
@@ -325,16 +472,20 @@
              // purge queues
              this.sendQueue.clear();
              this.tickingQueue.clear();
-@@ -1097,6 +_,111 @@
+@@ -1097,6 +_,116 @@
              // now all tickets should be removed, which is all of our external state
          }
  
 +        // Canvas start - extended view distance
-+        private static int getVisualViewDistance(final int sendViewDistance, final int requested) {
-+            if (requested <= 0) {
++        private static int getVisualViewDistance(
++            final int sendViewDistance, final int playerVVD, final int worldVVD, final int serverVVD
++        ) {
++            if (playerVVD <= 0 && worldVVD <= 0 && serverVVD <= 0) {
 +                return sendViewDistance;
 +            }
-+            return Math.max(sendViewDistance, (int) Math.clamp((long) requested, 0, MoonriseConstants.MAX_VIEW_DISTANCE));
++
++            final int vvd = playerVVD <= 0 ? worldVVD <= 0 ? serverVVD : worldVVD : playerVVD;
++            return Math.max(sendViewDistance, Math.clamp(vvd, 0, MoonriseConstants.MAX_VIEW_DISTANCE));
 +        }
 +
 +        private static int squaredDistance(final int dx, final int dz) {
@@ -398,16 +549,17 @@
 +
 +                this.sendQueue.dequeueLong();
 +                final Result result = extendedView.tryLoad(chunkX, chunkZ).getNow(null);
++                if (result == null || !result.isSuccess()) {
++                    this.vvBuildingQueue.add(chunkKey);
++                    continue;
++                }
 +                if (this.wantChunkInVVRange(chunkX, chunkZ) && !this.sentChunks.contains(chunkKey)) {
-+                    if (result == null || !result.isSuccess()) {
-+                        throw new IllegalStateException("fake chunk was unsuccessful but passed into send queue");
-+                    }
 +                    this.sentChunks.add(chunkKey);
 +                    this.fakeChunks.add(chunkKey);
 +                    extendedView.cache.watch(chunkKey);
 +                    this.pendingForget.remove(chunkKey);
 +                    this.player.connection.send(result.getPacketOrThrow());
-+                } else if (result != null && result.isSuccess()) {
++                } else {
 +                    extendedView.cache.evictIfUnwatched(chunkKey);
 +                }
 +            }

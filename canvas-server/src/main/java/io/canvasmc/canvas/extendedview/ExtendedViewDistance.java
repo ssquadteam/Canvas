@@ -5,8 +5,8 @@ import ca.spottedleaf.concurrentutil.util.Priority;
 import ca.spottedleaf.moonrise.common.util.CoordinateUtils;
 import ca.spottedleaf.moonrise.common.util.MoonriseCommon;
 import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO;
-import ca.spottedleaf.moonrise.patches.chunk_system.io.MoonriseRegionFileIO.RegionFileType;
 import com.mojang.logging.LogUtils;
+import io.canvasmc.canvas.GlobalConfiguration;
 import io.canvasmc.canvas.util.Util;
 import java.util.concurrent.CompletableFuture;
 import net.minecraft.nbt.CompoundTag;
@@ -21,22 +21,25 @@ import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.storage.SerializableChunkData;
-import net.minecraft.world.level.chunk.storage.SerializableChunkData.SectionData;
 import net.minecraft.world.ticks.LevelChunkTicks;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 
 public final class ExtendedViewDistance {
+
     public static final Logger LOGGER = LogUtils.getLogger();
 
+    // Canvas assigns MoonriseCommon.SERVER_GROUP after class load, so this cannot be a static initializer
     private static volatile PrioritisedExecutor packetBuildExecutor;
 
     public final VVChunkCache cache = new VVChunkCache();
+
     private final ServerLevel world;
     private final LevelChunkSection airSection;
 
     public ExtendedViewDistance(final ServerLevel world) {
         this.world = world;
+
         final PalettedContainerFactory factory = PalettedContainerFactory.create(this.world.registryAccess());
         this.airSection = new LevelChunkSection(factory.createForBlockStates(), factory.createForBiomes());
     }
@@ -55,29 +58,36 @@ public final class ExtendedViewDistance {
     }
 
     public CompletableFuture<Result> tryLoad(final int chunkX, final int chunkZ) {
-        final long chunkKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
-        return this.cache.computeIfAbsent(chunkKey, () -> this.startBuild(chunkKey, chunkX, chunkZ));
+        return this.cache.computeIfAbsent(
+            CoordinateUtils.getChunkKey(chunkX, chunkZ),
+            (_) -> this.startBuild(chunkX, chunkZ)
+        );
     }
 
-    private CompletableFuture<Result> startBuild(final long chunkKey, final int chunkX, final int chunkZ) {
+    private CompletableFuture<Result> startBuild(final int chunkX, final int chunkZ) {
+        final long chunkKey = CoordinateUtils.getChunkKey(chunkX, chunkZ);
         final CompletableFuture<Result> future = new CompletableFuture<>();
+
         try {
+            // load the chunk data ONLY
             MoonriseRegionFileIO.loadDataAsync(
                 this.world,
                 chunkX,
                 chunkZ,
-                RegionFileType.CHUNK_DATA,
-                (tag, thrown) -> packetBuildExecutor().queueTask(
-                    () -> this.completeBuild(chunkKey, chunkX, chunkZ, future, tag, thrown),
-                    Priority.IDLE
+                MoonriseRegionFileIO.RegionFileType.CHUNK_DATA,
+                (tag, throwable) -> packetBuildExecutor().queueTask(
+                    () -> this.completeBuild(chunkKey, chunkX, chunkZ, future, tag, throwable), Priority.IDLE
                 ),
                 false,
-                Priority.IDLE
+                Priority.IDLE // use idle, i dont give a fuck about this
             );
         } catch (final Throwable thrown) {
             this.cache.remove(chunkKey, future);
+
+            // ruh roh :(
             future.complete(new Result.Failure(thrown));
         }
+
         return future;
     }
 
@@ -86,67 +96,113 @@ public final class ExtendedViewDistance {
         final int chunkX,
         final int chunkZ,
         final CompletableFuture<Result> future,
-        final @Nullable CompoundTag tag,
-        final @Nullable Throwable ioThrown
+        @Nullable
+        final CompoundTag tag,
+        @Nullable
+        final Throwable ioThrowable
     ) {
-        if (ioThrown != null) {
+        if (ioThrowable != null) {
+            // failed, remove from cache and return
             this.cache.remove(chunkKey, future);
-            future.complete(new Result.Failure(ioThrown));
+            future.complete(new Result.Failure(ioThrowable));
             return;
         }
+
         try {
             if (tag != null) {
-                final SerializableChunkData data = SerializableChunkData.parse(this.world, this.world.palettedContainerFactory(), tag);
-                if (data != null
-                    && data.chunkStatus().isOrAfter(ChunkStatus.FULL)
-                    && data.chunkPos().equals(new ChunkPos(chunkX, chunkZ))) {
+                // parse the tag and then try and create the packet
+                final SerializableChunkData data = SerializableChunkData.parse(
+                    this.world,
+                    this.world.palettedContainerFactory(),
+                    tag
+                );
+
+                //noinspection ConstantValue - the data is nullable, stfu IntelliJ
+                if (
+                    data != null &&
+                    data.chunkStatus().isOrAfter(ChunkStatus.FULL) &&
+                    data.chunkPos().equals(new ChunkPos(chunkX, chunkZ))
+                ) {
                     final Result.Success result = this.buildRealChunkPacket(chunkX, chunkZ, data);
+
+                    // set "ready" bc of antixray
                     result.packet().setReady(true);
                     future.complete(result);
                     return;
                 }
             }
+
+            // not generated or something
             this.cache.remove(chunkKey, future);
             future.complete(Result.NotGenerated.INSTANCE);
         } catch (final Throwable thrown) {
             LOGGER.warn(
                 "Failed to build VV chunk at ({}, {}) in '{}', treating it as ungenerated",
-                chunkX, chunkZ, Util.getLevelName(this.world), thrown
+                chunkX,
+                chunkZ,
+                Util.getLevelName(this.world),
+                thrown
             );
+
+            // remove from cache and report failure
             this.cache.remove(chunkKey, future);
             future.complete(new Result.Failure(thrown));
         }
     }
 
-    private Result.Success buildRealChunkPacket(final int chunkX, final int chunkZ, final SerializableChunkData data) {
+    private Result.Success buildRealChunkPacket(
+        final int chunkX,
+        final int chunkZ,
+        final SerializableChunkData data
+    ) {
         final int sectionCount = this.world.getSectionsCount();
         final int minSectionY = this.world.getMinSectionY();
+
+        @Nullable
         final LevelChunkSection[] sections = new LevelChunkSection[sectionCount];
-        for (final SectionData sectionData : data.sectionData()) {
+
+        // truncate and read sections
+        for (final SerializableChunkData.SectionData sectionData : data.sectionData()) {
             final int index = sectionData.y() - minSectionY;
             if (index >= 0 && index < sectionCount && sectionData.chunkSection() != null) {
                 sections[index] = sectionData.chunkSection();
             }
         }
-        for (int index = 0; index < sectionCount; index++) {
+
+        // replace "null" sections with air
+        for (int index = 0; index < sectionCount; ++index) {
+            // this makes "sections" nonnull - required
             if (sections[index] == null) {
                 sections[index] = this.airSection;
             }
         }
 
-        if (this.world.canvasConfig().worldChunkSystem.lodHollowChunks) {
+        // try hollow chunks before we create the actual chunk object
+        if (GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.hollowChunks) {
+            //noinspection NullableProblems - we made "sections" nonnull above
             PacketConstructorUtils.carveChunk(sections, this.world, this.airSection);
         }
-        if (this.world.canvasConfig().worldChunkSystem.hideOres) {
+
+        // remove the ores if asked of us
+        if (GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.hideOres) {
+            //noinspection NullableProblems - we made "sections" nonnull above
             PacketConstructorUtils.clearOres(sections);
         }
 
+        //noinspection NullableProblems - we made "sections" nonnull above
         final LevelChunk chunk = new LevelChunk(
             this.world, new ChunkPos(chunkX, chunkZ), UpgradeData.EMPTY,
             new LevelChunkTicks<>(), new LevelChunkTicks<>(), 0L, sections, null, null
         );
+
+        // construct and return the finished packet
+        //noinspection DataFlowIssue - chunkPacketInfo can be null, Paper didnt add that annotation
         final ClientboundLevelChunkPacketData chunkData = new ClientboundLevelChunkPacketData(chunk, null);
-        final ClientboundLightUpdatePacketData lightData = PacketConstructorUtils.createLightData(data, this.world);
+        final ClientboundLightUpdatePacketData lightData = PacketConstructorUtils.createLightData(
+            data,
+            this.world
+        );
+
         return new Result.Success(new ClientboundLevelChunkWithLightPacket(chunkX, chunkZ, chunkData, lightData));
     }
 }

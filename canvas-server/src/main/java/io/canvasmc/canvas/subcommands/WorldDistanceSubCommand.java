@@ -28,18 +28,15 @@ import static net.minecraft.commands.Commands.literal;
 public class WorldDistanceSubCommand implements SubCommand {
 
     private static final SimpleCommandExceptionType ILLEGAL_TYPE_ARG = new SimpleCommandExceptionType(
-        Component.literal("Illegal type argument. Must be [\"view\", \"simulation\", \"lod\", \"visual\", \"vv\", \"v\", \"s\", \"sim\", or \"l\"]")
+        Component.literal("Illegal type argument. Must be [\"view\", \"simulation\", \"visual\", \"visual_view\", \"lod\", \"v\", \"vv\", \"s\", \"sim\", or \"l\"]")
     );
     private static final SimpleCommandExceptionType INVALID_DISTANCE = new SimpleCommandExceptionType(
         Component.literal("New value must be above 0")
     );
-    private static final SimpleCommandExceptionType INVALID_LOD_DISTANCE = new SimpleCommandExceptionType(
-        Component.literal("New value must be 0 or above, 0 disables LOD chunks")
-    );
 
     @Override
     public String getDescription() {
-        return "Gets or sets the view/simulation/LOD distance for a specific world.";
+        return "Gets or sets the view/simulation/visual distance for a specific world.";
     }
 
     @Override
@@ -49,9 +46,8 @@ public class WorldDistanceSubCommand implements SubCommand {
                 .suggests((_, builder) -> {
                     builder.suggest("view");
                     builder.suggest("simulation");
-                    builder.suggest("lod");
                     builder.suggest("visual");
-                    builder.suggest("vv");
+                    builder.suggest("lod");
                     return builder.buildFuture();
                 })
                 .then(argument("dimension", DimensionArgument.dimension())
@@ -80,15 +76,9 @@ public class WorldDistanceSubCommand implements SubCommand {
     private static int setDistance(final CommandContext<CommandSourceStack> context) throws CommandSyntaxException {
         final Type type = Type.from(StringArgumentType.getString(context, "type").toUpperCase(Locale.ROOT));
         final ServerLevel level = DimensionArgument.getDimension(context, "dimension");
-        final int distance = Math.min(context.getArgument("distance", int.class), type.maxDistance());
+        final int distance = Math.min(context.getArgument("distance", int.class), MoonriseConstants.MAX_VIEW_DISTANCE);
 
-        if (type == Type.LOD) {
-            // 0 is meaningful here, it turns the LOD ring off for the world
-            if (distance < 0) {
-                throw INVALID_LOD_DISTANCE.create();
-            }
-        }
-        else if (distance <= 0) {
+        if (distance <= 0) {
             throw INVALID_DISTANCE.create();
         }
 
@@ -99,26 +89,25 @@ public class WorldDistanceSubCommand implements SubCommand {
     }
 
     private static void applyOperation(final Type type, final ServerLevel level, final int distance) {
-        // update the distance override that we can use later on
-        type.set(level, distance);
+        final int clampTo = type != Type.VISUAL_VIEW ? MoonriseConstants.MAX_VIEW_DISTANCE - 3 : MoonriseConstants.MAX_VIEW_DISTANCE;
+        final int clamped = Math.clamp(distance, -1, clampTo);
 
-        if (type == Type.LOD) {
-            return; // the override itself is the whole operation, LodChunkSystem refreshes affected players
-        }
+        // update the distance override that we can use later on
+        type.set(level, clamped);
 
         final PerWorldDistanceConfig state = level.serverLevelData.canvas$distanceConfig;
-        final int updated = Math.min(
-            (type.equals(Type.VIEW)
-                ? state.viewDistanceOrDefault()
-                : state.simulationDistanceOrDefault()),
-            MoonriseConstants.MAX_VIEW_DISTANCE - 3
-        );
+        final int updated = switch (type) {
+            case VIEW -> state.viewDistanceOrDefault();
+            case SIMULATION -> state.simulationDistanceOrDefault();
+            case VISUAL_VIEW -> state.visualViewDistanceOrDefault();
+        };
 
         switch (type) {
             // we go straight through here because FeatureHooks hard-clamps at 32, which is technically wrong
             // since it should abide by the MAX_VIEW_DISTANCE arg
             case VIEW -> level.getChunkSource().chunkMap.setServerViewDistance(updated);
             case SIMULATION -> level.getChunkSource().chunkMap.getDistanceManager().updateSimulationDistance(updated);
+            case VISUAL_VIEW -> level.moonrise$getPlayerChunkLoader().setVisualViewDistance(updated);
         }
     }
 
@@ -146,18 +135,10 @@ public class WorldDistanceSubCommand implements SubCommand {
             (world, dist) -> world.serverLevelData.canvas$distanceConfig.setSimulationDistance(dist),
             "Simulation"
         ),
-        LOD(
-            (world) -> io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance().resolve(world).viewDistance(),
-            (world, dist) -> {
-                final io.canvasmc.canvas.chunk.lod.LodChunkService service = io.canvasmc.canvas.chunk.lod.LodChunkSystem.getInstance();
-                if (dist < 0) {
-                    service.clearWorldViewDistance(world.getWorld());
-                }
-                else {
-                    service.setWorldViewDistance(world.getWorld(), dist);
-                }
-            },
-            "LOD"
+        VISUAL_VIEW(
+            (world) -> world.serverLevelData.canvas$distanceConfig.visualViewDistanceOrDefault(),
+            (world, dist) -> world.serverLevelData.canvas$distanceConfig.setVisualViewDistance(dist),
+            "VVDistance"
         );
 
         private final Function<ServerLevel, Integer> getter;
@@ -175,7 +156,7 @@ public class WorldDistanceSubCommand implements SubCommand {
             return switch (lower) {
                 case "view", "v" -> VIEW;
                 case "simulation", "sim", "s" -> SIMULATION;
-                case "lod", "l", "visual", "vv" -> LOD;
+                case "visual", "visual_view", "vv", "lod", "l" -> VISUAL_VIEW;
                 default -> throw ILLEGAL_TYPE_ARG.create();
             };
         }
@@ -186,11 +167,6 @@ public class WorldDistanceSubCommand implements SubCommand {
 
         public void set(final ServerLevel level, final int dist) {
             this.setter.accept(level, dist);
-        }
-
-        public int maxDistance() {
-            // view and simulation keep upstream's headroom, the LOD ring has no ticket cost so it can use the cap
-            return this == LOD ? MoonriseConstants.MAX_VIEW_DISTANCE : MoonriseConstants.MAX_VIEW_DISTANCE - 3;
         }
     }
 }
