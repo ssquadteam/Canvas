@@ -165,10 +165,7 @@ public final class ExtendedViewDistance {
         for (final SerializableChunkData.SectionData sectionData : data.sectionData()) {
             final int index = sectionData.y() - minSectionY;
             if (index >= 0 && index < sectionCount && sectionData.chunkSection() != null) {
-                sections[index] = PacketConstructorUtils.repackForNetwork(
-                    sectionData.chunkSection(),
-                    this.sectionFactory
-                );
+                sections[index] = sectionData.chunkSection();
             }
         }
 
@@ -190,6 +187,11 @@ public final class ExtendedViewDistance {
         if (GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.hideOres) {
             //noinspection NullableProblems - we made "sections" nonnull above
             PacketConstructorUtils.clearOres(sections);
+        }
+
+        // carve/ores mutate in-place. write the rebuilt vanilla palettes, not those
+        for (int index = 0; index < sectionCount; ++index) {
+            sections[index] = PacketConstructorUtils.repackForNetwork(sections[index], this.sectionFactory);
         }
 
         //noinspection NullableProblems - we made "sections" nonnull above
