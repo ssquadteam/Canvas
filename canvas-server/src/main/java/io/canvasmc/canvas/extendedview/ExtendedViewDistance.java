@@ -110,11 +110,13 @@ public final class ExtendedViewDistance {
 
         try {
             if (tag != null) {
+                final CompoundTag upgraded = this.world.getChunkSource().chunkMap.upgradeChunkTag(tag);
+
                 // parse the tag and then try and create the packet
                 final SerializableChunkData data = SerializableChunkData.parse(
                     this.world,
                     this.world.palettedContainerFactory(),
-                    tag
+                    upgraded
                 );
 
                 //noinspection ConstantValue - the data is nullable, stfu IntelliJ
