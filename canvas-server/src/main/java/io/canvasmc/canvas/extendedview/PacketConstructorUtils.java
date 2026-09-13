@@ -3,17 +3,13 @@ package io.canvasmc.canvas.extendedview;
 import it.unimi.dsi.fastutil.objects.ObjectArrayList;
 import java.util.BitSet;
 import java.util.function.Predicate;
-import net.minecraft.core.Holder;
 import net.minecraft.network.protocol.game.ClientboundLightUpdatePacketData;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.tags.BlockTags;
-import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.chunk.DataLayer;
 import net.minecraft.world.level.chunk.LevelChunkSection;
-import net.minecraft.world.level.chunk.PalettedContainer;
-import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.storage.SerializableChunkData;
 import net.minecraft.world.level.lighting.LevelLightEngine;
 import org.jspecify.annotations.Nullable;
@@ -34,53 +30,6 @@ public class PacketConstructorUtils {
         || state.is(Blocks.DEEPSLATE_REDSTONE_ORE)
         || state.is(Blocks.DIAMOND_ORE)
         || state.is(Blocks.DEEPSLATE_DIAMOND_ORE);
-
-    public static LevelChunkSection createAirSection(final PalettedContainerFactory factory) {
-        return new LevelChunkSection(factory.createForBlockStates(), factory.createForBiomes());
-    }
-
-    // Disk parse bakes Paper anti-xray presets into the palette. Writing that with a
-    // vanilla (null ChunkPacketInfo) buffer can emit LinearPalette size 0 / bits mismatch
-    // that Lunar and vanilla clients crash on. Rebuild without presets before send.
-    public static LevelChunkSection repackForNetwork(
-        final LevelChunkSection source,
-        final PalettedContainerFactory factory
-    ) {
-        final PalettedContainer<Holder<Biome>> biomes = factory.createForBiomes();
-        try {
-            for (int y = 0; y < 4; ++y) {
-                for (int x = 0; x < 4; ++x) {
-                    for (int z = 0; z < 4; ++z) {
-                        biomes.set(x, y, z, source.getNoiseBiome(x, y, z));
-                    }
-                }
-            }
-        } catch (final RuntimeException ignored) {
-            // keep default plains
-        }
-
-        if (source.hasOnlyAir()) {
-            return new LevelChunkSection(factory.createForBlockStates(), biomes);
-        }
-
-        final PalettedContainer<BlockState> blocks = factory.createForBlockStates();
-        try {
-            for (int y = 0; y < 16; ++y) {
-                for (int x = 0; x < 16; ++x) {
-                    for (int z = 0; z < 16; ++z) {
-                        final BlockState state = source.getBlockState(x, y, z);
-                        if (!state.isAir()) {
-                            blocks.set(x, y, z, state);
-                        }
-                    }
-                }
-            }
-        } catch (final RuntimeException ignored) {
-            return new LevelChunkSection(factory.createForBlockStates(), biomes);
-        }
-
-        return new LevelChunkSection(blocks, biomes);
-    }
 
     public static void clearOres(final LevelChunkSection[] sections) {
         for (final LevelChunkSection section : sections) {
@@ -118,7 +67,7 @@ public class PacketConstructorUtils {
     public static void carveChunk(
         final LevelChunkSection[] sections,
         final ServerLevel world,
-        final PalettedContainerFactory factory
+        final LevelChunkSection airSection
     ) {
         final int sectionCount = sections.length;
         final int minSectionY = world.getMinSectionY();
@@ -131,9 +80,7 @@ public class PacketConstructorUtils {
 
         for (int index = 0; index < sectionCount; ++index) {
             final int sectionBaseY = (index + minSectionY) << 4;
-            final LevelChunkSection section = sectionBaseY + 15 <= 0
-                ? (sections[index] = createAirSection(factory))
-                : sections[index];
+            final LevelChunkSection section = sectionBaseY + 15 <= 0 ? (sections[index] = airSection) : sections[index];
             if (section.hasOnlyAir()) {
                 continue;
             }

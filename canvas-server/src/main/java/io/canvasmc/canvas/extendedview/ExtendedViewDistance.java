@@ -35,11 +35,13 @@ public final class ExtendedViewDistance {
     public final VVChunkCache cache = new VVChunkCache();
 
     private final ServerLevel world;
-    private final PalettedContainerFactory sectionFactory;
+    private final LevelChunkSection airSection;
 
     public ExtendedViewDistance(final ServerLevel world) {
         this.world = world;
-        this.sectionFactory = PalettedContainerFactory.create(this.world.registryAccess());
+
+        final PalettedContainerFactory factory = PalettedContainerFactory.create(this.world.registryAccess());
+        this.airSection = new LevelChunkSection(factory.createForBlockStates(), factory.createForBiomes());
     }
 
     private static PrioritisedExecutor packetBuildExecutor() {
@@ -173,25 +175,20 @@ public final class ExtendedViewDistance {
         for (int index = 0; index < sectionCount; ++index) {
             // this makes "sections" nonnull - required
             if (sections[index] == null) {
-                sections[index] = PacketConstructorUtils.createAirSection(this.sectionFactory);
+                sections[index] = this.airSection;
             }
         }
 
         // try hollow chunks before we create the actual chunk object
         if (GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.hollowChunks) {
             //noinspection NullableProblems - we made "sections" nonnull above
-            PacketConstructorUtils.carveChunk(sections, this.world, this.sectionFactory);
+            PacketConstructorUtils.carveChunk(sections, this.world, this.airSection);
         }
 
         // remove the ores if asked of us
         if (GlobalConfiguration.getInstance().chunkSystem.visualViewDistance.hideOres) {
             //noinspection NullableProblems - we made "sections" nonnull above
             PacketConstructorUtils.clearOres(sections);
-        }
-
-        // carve/ores mutate in-place. write the rebuilt vanilla palettes, not those
-        for (int index = 0; index < sectionCount; ++index) {
-            sections[index] = PacketConstructorUtils.repackForNetwork(sections[index], this.sectionFactory);
         }
 
         //noinspection NullableProblems - we made "sections" nonnull above
