@@ -110,15 +110,6 @@
  
      private final ServerLevel world;
  
-@@ -218,7 +_,7 @@
-         final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
- 
-         if (loader == null) {
--            return;
-+            throw new IllegalStateException("Player is already removed from player chunk loader"); // Folia - region threading
-         }
- 
-         loader.remove();
 @@ -236,6 +_,12 @@
      public void setTickDistance(final int distance) {
          ((ChunkSystemServerLevel)this.world).moonrise$getViewDistanceHolder().setTickViewDistance(distance);
@@ -158,15 +149,6 @@
  
      public boolean isChunkSent(final ServerPlayer player, final int chunkX, final int chunkZ, final boolean borderOnly) {
          return borderOnly ? this.isChunkSentBorderOnly(player, chunkX, chunkZ) : this.isChunkSent(player, chunkX, chunkZ);
-@@ -306,7 +_,7 @@
-     public void tick() {
-         TickThread.ensureTickThread("Cannot tick player chunk loader async");
-         long currTime = System.nanoTime();
--        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.players())) {
-+        for (final ServerPlayer player : new java.util.ArrayList<>(this.world.getLocalPlayers())) { // Folia - region threading
-             final PlayerChunkLoaderData loader = ((ChunkSystemServerPlayer)player).moonrise$getChunkLoader();
-             if (loader == null || loader.removed || loader.world != this.world) {
-                 // not our problem anymore
 @@ -412,6 +_,15 @@
          private final LongHeapPriorityQueue loadingQueue = new LongHeapPriorityQueue(this.queueComparator);
          private final LongHeapPriorityQueue loadQueue = new LongHeapPriorityQueue(this.queueComparator);

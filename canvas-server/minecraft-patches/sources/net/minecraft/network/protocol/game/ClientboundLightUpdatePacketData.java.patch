@@ -1,6 +1,6 @@
 --- a/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
 +++ b/net/minecraft/network/protocol/game/ClientboundLightUpdatePacketData.java
-@@ -47,6 +_,26 @@
+@@ -47,6 +_,24 @@
              }
          }
      }

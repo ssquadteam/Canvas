@@ -1,5 +1,38 @@
 --- a/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
 +++ b/src/main/java/org/bukkit/craftbukkit/entity/CraftPlayer.java
+@@ -1937,9 +_,16 @@
+         // Paper end
+         ChunkMap tracker = ((ServerLevel) this.getHandle().level()).getChunkSource().chunkMap;
+         ChunkMap.TrackedEntity entry = other.moonrise$getTrackedEntity(); // Folia - region threading
+-        if (entry != null) {
++        // Canvas start - fix folia visibility api - only touch the tracker from the thread owning the target entity
++        // TrackedEntity#seenBy is a plain hash set owned by the target's region thread. Mutating it from the viewer's
++        // region (every plugin hide/show loop does this) races the target's tracker tick and can leave the viewer in
++        // seenBy after the remove packet was sent, so the viewer keeps receiving updates for an entity it no longer has.
++        // Cross-region the viewer cannot be in seenBy anyway; invertedVisibilityEntities is concurrent, so the target's
++        // next tracker tick applies the change on the owning thread.
++        if (entry != null && ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(other)) {
+             entry.removePlayer(this.getHandle());
+         }
++        // Canvas end - fix folia visibility api
+ 
+         // Remove the hidden entity from this player user list, if they're on it
+         if (other instanceof ServerPlayer) {
+@@ -2034,9 +_,13 @@
+         }
+ 
+         ChunkMap.TrackedEntity entry = other.moonrise$getTrackedEntity(); // Folia - region threading
+-        if (entry != null && !entry.seenBy.contains(this.getHandle().connection)) {
++        // Canvas start - fix folia visibility api - only touch the tracker from the thread owning the target entity
++        // See unregisterEntity. Cross-region, updatePlayer would pair from the wrong thread and the target's own tick
++        // would unpair it again next tick; the tick pairs correctly once both share a region.
++        if (entry != null && ca.spottedleaf.moonrise.common.util.TickThread.isTickThreadFor(other) && !entry.seenBy.contains(this.getHandle().connection)) {
+             entry.updatePlayer(this.getHandle());
+         }
++        // Canvas end - fix folia visibility api
+ 
+         this.server.getPluginManager().callEvent(new PlayerShowEntityEvent(this, entity));
+     }
 @@ -2131,8 +_,14 @@
  
      @Override
@@ -17,7 +50,7 @@
  
      public boolean canSeePlayer(UUID uuid) {
          org.bukkit.entity.Entity entity = this.getServer().getPlayer(uuid);
-@@ -3227,6 +_,18 @@
+@@ -3294,6 +_,18 @@
      public void setSendViewDistance(final int viewDistance) {
          FeatureHooks.setSendViewDistance(this.getHandle(), viewDistance); // Paper - chunk system
      }
@@ -36,4 +69,3 @@
  
      // Paper start - entity effect API
      @Override
-

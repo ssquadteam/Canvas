@@ -6334,7 +6334,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..53dbff5600c325c54f8fb45bc25f2ab21782bca2
 --- /dev/null
 +++ b/io/papermc/paper/threadedregions/RegionizedServer.java
-@@ -0,0 +1,647 @@
+@@ -0,0 +1,651 @@
 +package io.papermc.paper.threadedregions;
 +
 +import ca.spottedleaf.common.util.TimeUtil;
