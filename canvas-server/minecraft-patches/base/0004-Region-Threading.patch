@@ -6931,6 +6931,10 @@ index 0000000000000000000000000000000000000000..53dbff5600c325c54f8fb45bc25f2ab2
 +
 +        world.moonrise$getChunkTaskScheduler().chunkHolderManager.processTicketUpdates(); // required to eventually process ticket updates
 +
++        // Canvas start - extended view distance
++        world.extendedViewDistance().cache.tick();
++        // Canvas end - extended view distance
++
 +        this.autoSaveMaps(world);
 +    }
 +
